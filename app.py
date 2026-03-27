@@ -339,3 +339,109 @@ elif step == 3:
         for key in ['step','form_data','uploaded_df','excel_bytes','parsed_kpis']:
             st.session_state.pop(key, None)
         st.rerun()
+
+# ═══════════════════════════════════════════
+# CHANGELOG  — visible on every step
+# ═══════════════════════════════════════════
+CHANGELOG = [
+    {
+        "version": "v1.5",
+        "date":    "27 Mar 2026",
+        "commit":  "c9e4117",
+        "title":   "Project-Specific Jira Status Mapping & Sidebar Reference",
+        "tag":     "✨ Feature",
+        "tag_color": "#2E75B6",
+        "changes": [
+            "Added project-specific Jira → Sprint Sheet status mapping for WMP, SATOC, and PreScreening.io",
+            "Fixed WMP 'Grooming Completed' typo — 59 items were unmapped causing % to not sum to 100%",
+            "Staging Deployed now maps to Staging → Pending % for WMP",
+            "Added Completed-QA (absolute count) and Completion-QA% columns to the KPI row in Excel",
+            "Added sidebar hamburger menu showing color-coded Jira → Sprint Sheet status reference per project",
+        ],
+    },
+    {
+        "version": "v1.4",
+        "date":    "25 Feb 2026",
+        "commit":  "2db237a",
+        "title":   "S.No Column, Renamed Columns & Revised Date Columns",
+        "tag":     "✨ Feature",
+        "tag_color": "#2E75B6",
+        "changes": [
+            "Added S.No (serial number) column to the task table in Excel output",
+            "Renamed columns for better clarity in the sprint sheet",
+            "Added Revised Target Start and Revised Target End date columns",
+        ],
+    },
+    {
+        "version": "v1.3",
+        "date":    "25 Feb 2026",
+        "commit":  "c1cdb76",
+        "title":   "Project Dropdown & IST-Based Filename",
+        "tag":     "✨ Feature",
+        "tag_color": "#2E75B6",
+        "changes": [
+            "Added project selector dropdown (WMP, SATOC, PreScreening.io, etc.)",
+            "Excel filename now auto-generated using project name + current IST date",
+        ],
+    },
+    {
+        "version": "v1.2",
+        "date":    "23 Feb 2026",
+        "commit":  "3818aa4",
+        "title":   "Excel Colour Scheme & Formatting Overhaul",
+        "tag":     "🎨 UI",
+        "tag_color": "#7030A0",
+        "changes": [
+            "Updated Excel output with a new colour scheme matching sprint sheet standards",
+            "Improved cell formatting, font weights, and header row styling",
+        ],
+    },
+    {
+        "version": "v1.1",
+        "date":    "20 Feb 2026",
+        "commit":  "3d7ad77",
+        "title":   "Comment Column, Hierarchy Fix & Sprint End Date Input",
+        "tag":     "🐛 Fix",
+        "tag_color": "#C00000",
+        "changes": [
+            "Added latest Jira comment column to the task table",
+            "Fixed Epic → Story → Sub-task hierarchy logic (external epics & orphan sub-tasks now handled)",
+            "Added Sprint End Date as a separate input field",
+        ],
+    },
+    {
+        "version": "v1.0",
+        "date":    "19 Feb 2026",
+        "commit":  "98165e7",
+        "title":   "Initial Release",
+        "tag":     "🚀 Launch",
+        "tag_color": "#00B050",
+        "changes": [
+            "Sprint Report Generator launched",
+            "3-step UI: Sprint Details → Upload Jira CSV → Download Excel Report",
+            "Auto-calculated KPIs: Action Items, Pending %, Not Initiated %, Production Release %",
+            "Jira CSV parsed into Epic → Story/Task → Sub-task hierarchy in Excel",
+        ],
+    },
+]
+
+st.markdown("---")
+with st.expander("📜 Changelog — What's New", expanded=False):
+    html_parts = []
+    for i, entry in enumerate(CHANGELOG):
+        latest = '<span style="background:#FFD700;color:#1F3864;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;margin-left:8px;">LATEST</span>' if i == 0 else ''
+        bullets = "".join(f'<li style="font-size:12px;color:#374151;margin-bottom:4px;">{c}</li>' for c in entry["changes"])
+        html_parts.append(
+            f'<div style="background:white;border-radius:10px;padding:16px 20px;margin-bottom:12px;'
+            f'box-shadow:0 1px 4px rgba(0,0,0,0.08);border-left:4px solid {entry["tag_color"]};">'
+            f'<p style="font-size:15px;font-weight:700;color:#1F3864;margin:0 0 8px 0;">'
+            f'{entry["version"]} &mdash; {entry["title"]}{latest}</p>'
+            f'<p style="margin:0 0 10px 0;">'
+            f'<span style="background:{entry["tag_color"]};color:white;font-size:11px;font-weight:600;padding:2px 10px;border-radius:10px;">{entry["tag"]}</span>&nbsp;'
+            f'<span style="background:#F1F5F9;color:#64748B;font-size:11px;padding:2px 10px;border-radius:10px;">&#128197; {entry["date"]}</span>&nbsp;'
+            f'<span style="background:#F1F5F9;color:#64748B;font-size:11px;padding:2px 10px;border-radius:10px;font-family:monospace;">#{entry["commit"]}</span>'
+            f'</p>'
+            f'<ul style="margin:0;padding-left:18px;">{bullets}</ul>'
+            f'</div>'
+        )
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
