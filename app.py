@@ -32,7 +32,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp { background-color: #F5F7FA; }
-    #MainMenu, footer { visibility: hidden; }
+    footer { visibility: hidden; }
     .header-banner {
         background: linear-gradient(135deg, #1F3864 0%, #2E75B6 100%);
         padding: 28px 36px; border-radius: 12px; margin-bottom: 28px;
@@ -63,6 +63,86 @@ st.markdown("""
 for key, default in [('step',1),('form_data',{}),('uploaded_df',None),('excel_bytes',None),('parsed_kpis',None)]:
     if key not in st.session_state:
         st.session_state[key] = default
+
+# ═══════════════════════════════════════════
+# SIDEBAR — Status Mapping Reference
+# ═══════════════════════════════════════════
+STATUS_MAPPING_REFERENCE = {
+    "WMP": [
+        ("To Do",              "Not Initiated",  "Not Initiated %"),
+        ("Grooming Completed", "Not Initiated",  "Not Initiated %"),
+        ("In Progress",        "In Progress",    "Pending %"),
+        ("Staging Deployed",   "Staging",        "Pending %"),
+        ("QA",                 "Completed - QA", "Completion - QA %"),
+        ("Done",               "Production",     "Production Release %"),
+    ],
+    "SATOC": [
+        ("To Do",          "Not Initiated",  "Not Initiated %"),
+        ("In Progress",    "In Progress",    "Pending %"),
+        ("Stage Deployed", "Staging",        "Completion - QA %"),
+        ("QA Review",      "QA Review",      "Completion - QA %"),
+        ("Done",           "Production",     "Production Release %"),
+    ],
+    "PreScreening.io": [
+        ("Grooming Completed", "Not Initiated",  "Not Initiated %"),
+        ("To Do",              "Not Initiated",  "Not Initiated %"),
+        ("In Progress",        "In Progress",    "Pending %"),
+        ("Stage Deployed",     "Staging",        "Pending %"),
+        ("QA Deployed",        "Completed - QA", "Completion - QA %"),
+        ("Done",               "Production",     "Production Release %"),
+    ],
+}
+
+BUCKET_COLORS = {
+    "Not Initiated":  "#ED7D31",
+    "In Progress":    "#00B0F0",
+    "Staging":        "#BF8F00",
+    "QA Review":      "#FFC000",
+    "Completed - QA": "#00B050",
+    "Production":     "#375623",
+}
+
+PCT_COLORS = {
+    "Not Initiated %":    "#ED7D31",
+    "Pending %":          "#FFC000",
+    "Completion - QA %":  "#00B050",
+    "Production Release %": "#375623",
+}
+
+with st.sidebar:
+    st.markdown("## 📋 Status Mapping Reference")
+    st.markdown("How Jira statuses map to the Sprint Sheet for each project.")
+    st.markdown("---")
+
+    for project, mappings in STATUS_MAPPING_REFERENCE.items():
+        st.markdown(f"### 🔷 {project}")
+        rows_html = ""
+        for jira_status, bucket, pct_col in mappings:
+            b_color  = BUCKET_COLORS.get(bucket,  "#94A3B8")
+            p_color  = PCT_COLORS.get(pct_col,    "#94A3B8")
+            rows_html += f"""
+            <tr>
+                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">{jira_status}</td>
+                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">
+                    <span style="background:{b_color};color:white;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">{bucket}</span>
+                </td>
+                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">
+                    <span style="background:{p_color};color:white;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">{pct_col}</span>
+                </td>
+            </tr>"""
+        st.markdown(f"""
+        <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
+            <thead>
+                <tr style="background:#1F3864;">
+                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Jira Status</th>
+                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Sprint Sheet Status</th>
+                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Contributes To</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+        </table>
+        """, unsafe_allow_html=True)
+        st.markdown("---")
 
 st.markdown('<div class="header-banner"><h1>🚀 Sprint Report Generator</h1><p>Fill in sprint details · Upload your Jira CSV · Download the formatted Excel report</p></div>', unsafe_allow_html=True)
 
@@ -201,7 +281,7 @@ elif step == 3:
 
     if st.session_state.excel_bytes is None:
         with st.spinner("⏳ Parsing Jira data and building your Excel report..."):
-            parsed = parse_jira_csv(df)
+            parsed = parse_jira_csv(df, fd['project_name'])
             st.session_state.excel_bytes = build_excel(fd, parsed)
             st.session_state.parsed_kpis = parsed['kpis']
 

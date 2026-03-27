@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import date
 
 
-# ── Status mappings (adjust if your Jira uses different labels) ──────────────
+# ── Global fallback status mappings ──────────────────────────────────────────
 STATUS_NOT_INITIATED   = ['To Do', 'Not Initiated', 'Open']
 STATUS_IN_PROGRESS     = ['In Progress']
 STATUS_STAGING         = ['Staging Deployed', 'Staging']
@@ -28,6 +28,55 @@ STATUS_ANOTHER_SPRINT  = ['To Be Picked In Another Sprint', 'Deferred']
 # Issue types treated as Stories/Tasks (children of Epics)
 STORY_LEVEL_TYPES = ['Story', 'Task', 'Bug', 'Improvement', 'New Feature']
 
+# ── Project-specific: Jira status (lowercase) → Section 2 bucket ─────────────
+PROJECT_STATUS_MAP = {
+    'WMP': {
+        'to do':             'not_initiated',
+        'grooming completed': 'not_initiated',
+        'in progress':       'in_progress',
+        'staging deployed':  'staging',
+        'qa':                'qa_approved',    # WMP's QA = Completed-QA stage
+        'done':              'production',
+    },
+    'SATOC': {
+        'to do':             'not_initiated',
+        'in progress':       'in_progress',
+        'stage deployed':    'staging',
+        'qa review':         'qa_review',
+        'done':              'production',
+    },
+    'PreScreening.io': {
+        'grooming completed': 'not_initiated',
+        'to do':              'not_initiated',
+        'in progress':        'in_progress',
+        'stage deployed':     'staging',
+        'qa deployed':        'qa_deployed',
+        'done':               'production',
+    },
+}
+
+# ── Project-specific: which Section 2 buckets roll up into each % KPI ────────
+PROJECT_PCT_BUCKETS = {
+    'WMP': {
+        'pending_pct':            ['in_progress', 'staging'],  # Staging Deployed = still pending
+        'not_initiated_pct':      ['not_initiated'],
+        'completion_qa_pct':      ['qa_approved'],
+        'production_release_pct': ['production'],
+    },
+    'SATOC': {
+        'pending_pct':            ['in_progress'],
+        'not_initiated_pct':      ['not_initiated'],
+        'completion_qa_pct':      ['staging', 'qa_review'],  # both stages combined
+        'production_release_pct': ['production'],
+    },
+    'PreScreening.io': {
+        'pending_pct':            ['in_progress', 'staging'],  # Stage Deployed = still pending
+        'not_initiated_pct':      ['not_initiated'],
+        'completion_qa_pct':      ['qa_deployed'],
+        'production_release_pct': ['production'],
+    },
+}
+
 
 def _match_status(status_val, status_list):
     if pd.isna(status_val):
@@ -35,7 +84,7 @@ def _match_status(status_val, status_list):
     return any(s.lower() in str(status_val).lower() for s in status_list)
 
 
-def parse_jira_csv(df: pd.DataFrame) -> dict:
+def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
     """
     Main entry point. Takes the raw Jira DataFrame and returns a dict with:
       - hierarchy: ordered list of dicts for the Excel task table
@@ -155,24 +204,66 @@ def parse_jira_csv(df: pd.DataFrame) -> dict:
     def count_status(status_list):
         return int(non_epic['Status'].apply(lambda s: _match_status(s, status_list)).sum())
 
-    not_initiated  = count_status(STATUS_NOT_INITIATED)
-    in_progress    = count_status(STATUS_IN_PROGRESS)
-    staging        = count_status(STATUS_STAGING)
-    qa_review      = count_status(STATUS_QA_REVIEW)
-    qa_deployed    = count_status(STATUS_QA_DEPLOYED)
-    qa_approved    = count_status(STATUS_QA_APPROVED)
-    production     = count_status(STATUS_PRODUCTION)
-    on_hold        = count_status(STATUS_ON_HOLD)
-    another_sprint = count_status(STATUS_ANOTHER_SPRINT)
+    if project_name in PROJECT_STATUS_MAP:
+        # ── Project-specific counting ────────────────────────────────────
+        bucket_map = PROJECT_STATUS_MAP[project_name]
+        pct_map    = PROJECT_PCT_BUCKETS[project_name]
+
+        # Zero-out all buckets
+        buckets = {b: 0 for b in [
+            'not_initiated', 'in_progress', 'staging', 'qa_review',
+            'qa_deployed', 'qa_approved', 'production', 'on_hold', 'to_be_picked'
+        ]}
+
+        # Count each item into its mapped bucket
+        for status_val in non_epic['Status']:
+            key = str(status_val).lower().strip()
+            if key in bucket_map:
+                buckets[bucket_map[key]] += 1
+
+        not_initiated  = buckets['not_initiated']
+        in_progress    = buckets['in_progress']
+        staging        = buckets['staging']
+        qa_review      = buckets['qa_review']
+        qa_deployed    = buckets['qa_deployed']
+        qa_approved    = buckets['qa_approved']
+        production     = buckets['production']
+        on_hold        = buckets['on_hold']
+        another_sprint = buckets['to_be_picked']
+
+        def _pct(bucket_list):
+            return round(sum(buckets[b] for b in bucket_list) / total * 100, 2) if total else 0
+
+        completed_qa      = sum(buckets[b] for b in pct_map['completion_qa_pct'])
+        pending_pct       = _pct(pct_map['pending_pct'])
+        not_initiated_pct = _pct(pct_map['not_initiated_pct'])
+        completion_qa_pct = _pct(pct_map['completion_qa_pct'])
+        production_pct    = _pct(pct_map['production_release_pct'])
+
+    else:
+        # ── Global fallback counting ─────────────────────────────────────
+        not_initiated  = count_status(STATUS_NOT_INITIATED)
+        in_progress    = count_status(STATUS_IN_PROGRESS)
+        staging        = count_status(STATUS_STAGING)
+        qa_review      = count_status(STATUS_QA_REVIEW)
+        qa_deployed    = count_status(STATUS_QA_DEPLOYED)
+        qa_approved    = count_status(STATUS_QA_APPROVED)
+        production     = count_status(STATUS_PRODUCTION)
+        on_hold        = count_status(STATUS_ON_HOLD)
+        another_sprint = count_status(STATUS_ANOTHER_SPRINT)
+
+        completed_qa      = qa_approved
+        pending_pct       = round((in_progress / total * 100), 2) if total else 0
+        not_initiated_pct = round((not_initiated / total * 100), 2) if total else 0
+        completion_qa_pct = round((completed_qa  / total * 100), 2) if total else 0
+        production_pct    = round((production    / total * 100), 2) if total else 0
 
     pending_action = not_initiated
 
-    pending_pct       = round((not_initiated / total * 100), 2) if total else 0
-    not_initiated_pct = round((not_initiated / total * 100), 2) if total else 0
-    production_pct    = round((production    / total * 100), 2) if total else 0
-
     kpis = {
         'action_items':           total,
+        'completed_qa':           completed_qa,
+        'completion_qa_pct':      f"{completion_qa_pct}%",
         'pending_pct':            f"{pending_pct}%",
         'not_initiated_pct':      f"{not_initiated_pct}%",
         'production_release_pct': f"{production_pct}%",

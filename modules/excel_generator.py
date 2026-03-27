@@ -109,7 +109,7 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         if fd['total_days'] > 0 else 0
 
     ALL_COLS   = ['A','B','C','D','E','F','G','H','I','J','K']
-    META_COLS  = ['A','B','C','D','E','F','G','H']
+    META_COLS  = ['A','B','C','D','E','F','G','H','I','J']
     STAT_COLS  = ALL_COLS
 
     meta_hdrs = [
@@ -118,9 +118,11 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         ('C1', 'Sprint Development Release', C_DEV),
         ('D1', 'Sprint QA Release',          C_QA),
         ('E1', 'Production Release',         C_PROD),
-        ('F1', 'Sprint End Date',            C_END),
-        ('G1', 'Total No. of Days',          C_DAYS),
-        ('H1', 'Scrum Master',               C_SCRUM),
+        ('F1', 'Tech Debt Release',          C_PROD),
+        ('G1', 'Sprint End Date',            C_END),
+        ('H1', 'Total No. of Days',          C_DAYS),
+        ('I1', 'Scrum Master',               C_SCRUM),
+        ('J1', 'Grooming session',           C_SCRUM),
     ]
     for ref, label, bg in meta_hdrs:
         c = ws[ref]; c.value = label; _apply(c, _hdr(bg))
@@ -132,9 +134,11 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         'C2': fd['dev_release'].strftime('%d %b %Y'),
         'D2': fd['qa_release'].strftime('%d %b %Y'),
         'E2': fd['prod_release'].strftime('%d %b %Y'),
-        'F2': fd['sprint_end'].strftime('%d %b %Y'),
-        'G2': fd['total_days'],
-        'H2': fd['scrum_master'],
+        'F2': '',                                       # Tech Debt Release — logic TBD
+        'G2': fd['sprint_end'].strftime('%d %b %Y'),
+        'H2': fd['total_days'],
+        'I2': fd['scrum_master'],
+        'J2': '',                                       # Grooming session — logic TBD
     }
     for ref, val in meta_vals.items():
         c = ws[ref]; c.value = val; _apply(c, _val('FFF2CC', BLACK, True, 10))
@@ -145,12 +149,14 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
     kpi_hdrs = [
         ('A4', 'No of Days Left in Sprint', C_SPRINT_NO),
         ('B4', 'Action Items',              C_KPI_AI),
-        ('C4', 'Pending %',                 C_KPI_PEND),
-        ('D4', 'Not Initiated %',           C_KPI_NOTINIT),
-        ('E4', 'Production Release %',      C_KPI_PRODPCT),
-        ('F4', '',                          'D9D9D9'),
-        ('G4', '',                          'D9D9D9'),
+        ('C4', 'Completed - QA',            C_QAAPP),
+        ('D4', 'Completion - QA %',         C_QAAPP),
+        ('E4', 'Pending %',                 C_KPI_PEND),
+        ('F4', 'Not Initiated %',           C_KPI_NOTINIT),
+        ('G4', 'Production Release %',      C_KPI_PRODPCT),
         ('H4', '',                          'D9D9D9'),
+        ('I4', '',                          'D9D9D9'),
+        ('J4', '',                          'D9D9D9'),
     ]
     for ref, label, bg in kpi_hdrs:
         c = ws[ref]; c.value = label; _apply(c, _hdr(bg))
@@ -159,13 +165,15 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
     kpi_vals = {
         'A5': fd['days_left'],
         'B5': kpis['action_items'],
-        'C5': kpis['pending_pct'],
-        'D5': kpis['not_initiated_pct'],
-        'E5': kpis['production_release_pct'],
+        'C5': kpis['completed_qa'],
+        'D5': kpis['completion_qa_pct'],
+        'E5': kpis['pending_pct'],
+        'F5': kpis['not_initiated_pct'],
+        'G5': kpis['production_release_pct'],
     }
     for ref, val in kpi_vals.items():
         c = ws[ref]; c.value = val; _apply(c, _val(WHITE, BLACK, True, 11))
-    for col in ['F','G','H']:
+    for col in ['H','I','J']:
         ws[f'{col}5'].fill = PatternFill('solid', start_color='F2F2F2')
     ws.row_dimensions[5].height = 22
 
