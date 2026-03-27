@@ -148,7 +148,105 @@ st.markdown('<div class="header-banner"><h1>🚀 Sprint Report Generator</h1><p>
 
 step = st.session_state.step
 def _sc(n): return "active" if step==n else ("done" if step>n else "")
-st.markdown(f'<div class="step-bar"><div class="step {_sc(1)}">① Sprint Details</div><div class="step {_sc(2)}">② Upload Jira CSV</div><div class="step {_sc(3)}">③ Download Report</div></div>', unsafe_allow_html=True)
+
+# ── Step bar + ℹ️ How-to button ──────────────────────────────────────────────
+@st.dialog("📖 How to Export Your Jira CSV", width="large")
+def show_jira_guide():
+    st.markdown("""
+<style>
+.guide-step {
+    display:flex; gap:16px; align-items:flex-start;
+    background:white; border-radius:10px; padding:16px 18px;
+    margin-bottom:12px; box-shadow:0 1px 4px rgba(0,0,0,0.07);
+    border-left: 4px solid #2E75B6;
+}
+.guide-num {
+    background:#1F3864; color:white; border-radius:50%;
+    width:28px; height:28px; min-width:28px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:13px; font-weight:700;
+}
+.guide-body { flex:1; }
+.guide-title { font-size:14px; font-weight:700; color:#1F3864; margin-bottom:4px; }
+.guide-desc  { font-size:12px; color:#374151; line-height:1.6; }
+.jql-box {
+    background:#1E293B; color:#7DD3FC; font-family:monospace;
+    font-size:12px; padding:10px 14px; border-radius:6px;
+    margin-top:8px; word-break:break-all;
+}
+.tip-box {
+    background:#EFF6FF; border-left:3px solid #2E75B6;
+    padding:10px 14px; border-radius:0 6px 6px 0;
+    font-size:12px; color:#1E40AF; margin-top:12px;
+}
+</style>
+
+<div class="guide-step">
+  <div class="guide-num">1</div>
+  <div class="guide-body">
+    <div class="guide-title">Open your Jira Project Board</div>
+    <div class="guide-desc">Go to <b>Jira</b> and navigate to the relevant project (e.g. <b>WMP → Data Management &amp; Scraping</b>).</div>
+  </div>
+</div>
+
+<div class="guide-step">
+  <div class="guide-num">2</div>
+  <div class="guide-body">
+    <div class="guide-title">Click on the "All Work" Tab</div>
+    <div class="guide-desc">In the top navigation of your project board, click on <b>All work</b>.</div>
+  </div>
+</div>
+
+<div class="guide-step">
+  <div class="guide-num">3</div>
+  <div class="guide-body">
+    <div class="guide-title">Open Filters → Switch to JQL</div>
+    <div class="guide-desc">Click the <b>Filter</b> button in the top bar. In the filter panel, switch to the <b>JQL</b> tab.</div>
+  </div>
+</div>
+
+<div class="guide-step">
+  <div class="guide-num">4</div>
+  <div class="guide-body">
+    <div class="guide-title">Enter the JQL Query</div>
+    <div class="guide-desc">Type the following JQL — replace the project key and sprint name with your sprint's details:</div>
+    <div class="jql-box">project = WM AND sprint = "WM Sprint 29" ORDER BY issuetype ASC, priority DESC</div>
+    <div class="guide-desc" style="margin-top:8px;">
+        &bull; <b>project</b> = your Jira project key (e.g. <code>WM</code>, <code>SAT</code>, <code>PS</code>)<br>
+        &bull; <b>sprint</b> = exact sprint name as it appears in Jira<br>
+        &bull; Keep the <code>ORDER BY</code> clause as-is for best results
+    </div>
+  </div>
+</div>
+
+<div class="guide-step">
+  <div class="guide-num">5</div>
+  <div class="guide-body">
+    <div class="guide-title">Export → CSV (All Fields)</div>
+    <div class="guide-desc">Click the <b>⋯</b> menu icon on the top-right of the work list → hover over <b>Export</b> → select <b>CSV - all fields</b>.</div>
+  </div>
+</div>
+
+<div class="guide-step">
+  <div class="guide-num">6</div>
+  <div class="guide-body">
+    <div class="guide-title">Upload the CSV Here</div>
+    <div class="guide-desc">Come back to this app, complete <b>Step 1</b> (Sprint Details), then upload the downloaded CSV file in <b>Step 2</b>.</div>
+  </div>
+</div>
+
+<div class="tip-box">
+💡 <b>Tip:</b> Always use <b>CSV - all fields</b> (not "my defaults") to ensure all required columns like
+<code>Parent key</code>, <code>Custom field (Target start)</code>, and <code>Comment</code> are included.
+</div>
+""", unsafe_allow_html=True)
+
+bar_col, btn_col = st.columns([11, 1])
+with bar_col:
+    st.markdown(f'<div class="step-bar"><div class="step {_sc(1)}">① Sprint Details</div><div class="step {_sc(2)}">② Upload Jira CSV</div><div class="step {_sc(3)}">③ Download Report</div></div>', unsafe_allow_html=True)
+with btn_col:
+    if st.button("ℹ️", help="How to export Jira CSV", use_container_width=True):
+        show_jira_guide()
 
 # ═══════════════════════════════════════════
 # STEP 1
