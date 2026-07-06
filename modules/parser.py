@@ -1,6 +1,6 @@
 """
 parser.py
-Reads the Jira CSV export, builds the Epic → Story/Task/Bug → Subtask hierarchy,
+Reads the Jira CSV export, builds the Epic -> Story/Task/Bug -> Subtask hierarchy,
 and calculates all KPI values for the sprint summary block.
 
 Fixes applied:
@@ -14,7 +14,7 @@ import pandas as pd
 from datetime import date
 
 
-# ── Global fallback status mappings ──────────────────────────────────────────
+# Global fallback status mappings
 STATUS_NOT_INITIATED   = ['To Do', 'Not Initiated', 'Open']
 STATUS_IN_PROGRESS     = ['In Progress']
 STATUS_STAGING         = ['Staging Deployed', 'Staging']
@@ -27,8 +27,9 @@ STATUS_ANOTHER_SPRINT  = ['To Be Picked In Another Sprint', 'Deferred']
 
 # Issue types treated as Stories/Tasks (children of Epics)
 STORY_LEVEL_TYPES = ['Story', 'Task', 'Bug', 'Improvement', 'New Feature']
+REQUIRED_COLUMNS = ['Issue key', 'Issue Type', 'Summary', 'Status']
 
-# ── Project-specific: Jira status (lowercase) → Section 2 bucket ─────────────
+# Project-specific: Jira status (lowercase) -> Section 2 bucket
 PROJECT_STATUS_MAP = {
     'WMP': {
         'to do':             'not_initiated',
@@ -55,7 +56,7 @@ PROJECT_STATUS_MAP = {
     },
 }
 
-# ── Project-specific: which Section 2 buckets roll up into each % KPI ────────
+# Project-specific: which Section 2 buckets roll up into each % KPI
 PROJECT_PCT_BUCKETS = {
     'WMP': {
         'pending_pct':            ['in_progress', 'staging'],  # Staging Deployed = still pending
@@ -78,6 +79,20 @@ PROJECT_PCT_BUCKETS = {
 }
 
 
+def _ensure_text_column(df: pd.DataFrame, column: str, default: str = '') -> None:
+    if column not in df.columns:
+        df[column] = default
+    df[column] = df[column].fillna(default).astype(str).str.strip()
+
+
+def _ensure_datetime_column(df: pd.DataFrame, source_column: str, target_column: str | None = None) -> None:
+    target = target_column or source_column
+    if source_column in df.columns:
+        df[target] = pd.to_datetime(df[source_column], errors='coerce')
+    else:
+        df[target] = pd.NaT
+
+
 def _match_status(status_val, status_list):
     if pd.isna(status_val):
         return False
@@ -90,32 +105,35 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
       - hierarchy: ordered list of dicts for the Excel task table
       - kpis: all calculated KPI values for the sprint summary block
     """
-    # ── Normalise columns ────────────────────────────────────────────────────
+    # Normalise columns and supply safe defaults for optional Jira export fields.
     df = df.copy()
-    df['Summary']     = df['Summary'].fillna('').str.strip()
-    df['Status']      = df['Status'].fillna('').str.strip()
-    df['Priority']    = df['Priority'].fillna('').str.strip()
-    df['Assignee']    = df['Assignee'].fillna('Unassigned').str.strip()
-    df['Issue Type']  = df['Issue Type'].fillna('').str.strip()
-    df['Parent key']  = df['Parent key'].fillna('').str.strip() if 'Parent key' in df.columns else ''
-    df['Due date']    = pd.to_datetime(df.get('Due date'), errors='coerce')
+    missing_required = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+    if missing_required:
+        raise ValueError(f"Missing required columns: {', '.join(missing_required)}")
+
+    _ensure_text_column(df, 'Issue key')
+    _ensure_text_column(df, 'Issue Type')
+    _ensure_text_column(df, 'Summary')
+    _ensure_text_column(df, 'Status')
+    _ensure_text_column(df, 'Priority')
+    _ensure_text_column(df, 'Assignee', 'Unassigned')
+    _ensure_text_column(df, 'Parent key')
+    _ensure_datetime_column(df, 'Due date')
 
     target_start_col = 'Custom field (Target start)'
-    target_end_col   = 'Custom field (Target end)'
-    df['Target Start'] = pd.to_datetime(df.get(target_start_col), errors='coerce') \
-        if target_start_col in df.columns else pd.NaT
-    df['Target End']   = pd.to_datetime(df.get(target_end_col), errors='coerce') \
-        if target_end_col in df.columns else pd.NaT
+    target_end_col = 'Custom field (Target end)'
+    _ensure_datetime_column(df, target_start_col, 'Target Start')
+    _ensure_datetime_column(df, target_end_col, 'Target End')
 
-    # ── Split by type ────────────────────────────────────────────────────────
+    # Split by type
     epics_df    = df[df['Issue Type'] == 'Epic']
     stories_df  = df[df['Issue Type'].isin(STORY_LEVEL_TYPES)]
     subtasks_df = df[df['Issue Type'] == 'Sub-task']
 
-    # Build a lookup: issue_key → row for all epics present in CSV
+    # Build a lookup: issue_key -> row for all epics present in CSV
     epic_keys_in_csv = set(epics_df['Issue key'].tolist())
 
-    # ── Build ordered hierarchy ──────────────────────────────────────────────
+    # Build ordered hierarchy
     hierarchy = []
     processed_stories = set()  # track which story-level items we've placed
 
@@ -168,7 +186,7 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
             for _, sub in subs.iterrows():
                 hierarchy.append(_make_row(sub, level=2))
 
-    # PASS 3: Standalone items — story-level with NO parent key at all
+    # PASS 3: Standalone items - story-level with NO parent key at all
     standalone_stories = unresolved_stories[
         ~unresolved_stories['Issue key'].isin(processed_stories)
     ]
@@ -180,7 +198,7 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
     if len(standalone_stories) > 0 or len(orphan_subtasks) > 0:
         unlinked_header = {
             'level':        0,
-            'issue_key':    '—',
+            'issue_key':    '-',
             'issue_type':   'Group',
             'summary':      'UNLINKED / STANDALONE ITEMS',
             'status':       '',
@@ -197,7 +215,7 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
         for _, row in orphan_subtasks.iterrows():
             hierarchy.append(_make_row(row, level=2))
 
-    # ── KPI calculation (exclude Epics) ─────────────────────────────────────
+    # KPI calculation (exclude Epics)
     non_epic = df[df['Issue Type'] != 'Epic']
     total    = len(non_epic)
 
@@ -205,7 +223,7 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
         return int(non_epic['Status'].apply(lambda s: _match_status(s, status_list)).sum())
 
     if project_name in PROJECT_STATUS_MAP:
-        # ── Project-specific counting ────────────────────────────────────
+        # Project-specific counting
         bucket_map = PROJECT_STATUS_MAP[project_name]
         pct_map    = PROJECT_PCT_BUCKETS[project_name]
 
@@ -241,7 +259,7 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
         production_pct    = _pct(pct_map['production_release_pct'])
 
     else:
-        # ── Global fallback counting ─────────────────────────────────────
+        # Global fallback counting
         not_initiated  = count_status(STATUS_NOT_INITIATED)
         in_progress    = count_status(STATUS_IN_PROGRESS)
         staging        = count_status(STATUS_STAGING)
@@ -302,7 +320,7 @@ def _extract_latest_comment(row) -> str:
             latest = str(val).strip()
     if not latest:
         return ''
-    # Split on semicolon — take everything after the 2nd semicolon
+    # Split on semicolon and take everything after the 2nd semicolon
     parts = latest.split(';', 2)
     if len(parts) == 3:
         return parts[2].strip()

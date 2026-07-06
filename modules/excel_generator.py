@@ -2,7 +2,7 @@
 excel_generator.py
 Builds the complete Sprint Report Excel file:
   - Sprint Summary block (rows 1-14) at the top
-  - Full Epic → Story/Task → Subtask hierarchy table below
+  - Full Epic -> Story/Task -> Subtask hierarchy table below
 """
 
 import io
@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 
 JIRA_BASE = "https://jira-zigram.atlassian.net/browse"
 
-# ── Colour constants ──────────────────────────────────────────────────────────
+# Colour constants
 WHITE   = 'FFFFFF'
 BLACK   = '000000'
 
@@ -57,7 +57,7 @@ STATUS_TODO    = ('FCE4D6', '9C0006')
 STATUS_STAGING = ('FFF2CC', '7F6000')
 
 
-# ── Style helpers ─────────────────────────────────────────────────────────────
+# Style helpers
 
 def _hdr(bg, fg=WHITE, bold=True, sz=9):
     return dict(
@@ -94,7 +94,7 @@ def _blank_row(ws, row, cols, bg='F2F2F2', height=6):
         ws[f'{col}{row}'].fill = PatternFill('solid', start_color=bg)
 
 
-# ── Main builder ──────────────────────────────────────────────────────────────
+# Main builder
 
 def build_excel(form_data: dict, parsed: dict) -> bytes:
     wb = Workbook()
@@ -134,11 +134,11 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         'C2': fd['dev_release'].strftime('%d %b %Y'),
         'D2': fd['qa_release'].strftime('%d %b %Y'),
         'E2': fd['prod_release'].strftime('%d %b %Y'),
-        'F2': '',                                       # Tech Debt Release — logic TBD
+        'F2': '',                                       # Tech Debt Release - logic TBD
         'G2': fd['sprint_end'].strftime('%d %b %Y'),
         'H2': fd['total_days'],
         'I2': fd['scrum_master'],
-        'J2': '',                                       # Grooming session — logic TBD
+        'J2': '',                                       # Grooming session - logic TBD
     }
     for ref, val in meta_vals.items():
         c = ws[ref]; c.value = val; _apply(c, _val('FFF2CC', BLACK, True, 10))
@@ -237,7 +237,7 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         ws.row_dimensions[row].height = 20
 
     ws.row_dimensions[14].height = 14
-    ws['A14'].value = '🟡 Yellow = Manual Input   |   Auto-calculated fields derived from Jira CSV'
+    ws['A14'].value = 'Yellow = Manual Input | Auto-calculated fields derived from Jira CSV'
     ws['A14'].font  = Font(name='Arial', size=8, italic=True, color='595959')
 
     # Columns: S.No | Issue Key | Jira Link | Issue Type | Summary | Status |
@@ -279,7 +279,7 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         if i + 1 < len(hierarchy) and hierarchy[i+1]['level'] == 0:
             rows_with_spacers.append(None)
 
-    # ── Pre-compute S.No for every item ──────────────────────────────────────
+    # Pre-compute S.No for every item
     epic_counter  = 0
     story_counter = 0
     sub_counters  = {}   # parent_story_idx -> sub count
@@ -314,7 +314,7 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
         if item is not None:
             item['sno'] = item_sno
 
-    # ── Write rows ────────────────────────────────────────────────────────────
+    # Write rows
     current_row = 16
     for item in rows_with_spacers:
 
@@ -334,11 +334,11 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
             bg, fg, bold, sz = EPIC_BG, '4A235A', True, 10
             row_h = 28
         elif level == 1:
-            summary_disp = '    ▶  ' + item['summary']
+            summary_disp = '    >  ' + item['summary']
             bg, fg, bold, sz = WHITE, '1F3864', True, 10
             row_h = 22
         else:
-            summary_disp = '         ◦  ' + item['summary']
+            summary_disp = '         -  ' + item['summary']
             bg, fg, bold, sz = WHITE, '1F3864', False, 10
             row_h = 18
 
