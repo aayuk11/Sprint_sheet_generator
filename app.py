@@ -86,6 +86,16 @@ def _hydrate_project_form(project_name: str) -> None:
         st.session_state[key] = value
 
 
+def _project_options() -> list:
+    """Base project list plus any custom projects the user has created/saved,
+    so newly added projects keep appearing in the dropdown across sessions."""
+    options = list(PROJECTS)
+    for name in st.session_state.get("saved_sprint_details", {}):
+        if name not in options:
+            options.append(name)
+    return options
+
+
 def _load_selected_project_details() -> None:
     project_name = st.session_state.project_selector
     st.session_state.active_project = project_name
@@ -540,9 +550,11 @@ if step == 1:
 
     project_name = st.selectbox(
         "Project",
-        PROJECTS,
+        _project_options(),
         key="project_selector",
         on_change=_load_selected_project_details,
+        accept_new_options=True,
+        help="Pick a project, or type a new name and choose the \"Add ...\" option to create it.",
     )
 
     c1, c2, c3, c4 = st.columns(4)
