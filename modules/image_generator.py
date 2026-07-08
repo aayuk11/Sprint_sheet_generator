@@ -21,9 +21,12 @@ _FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
 def _font(size: int, bold: bool = False):
     candidates = [
-        # Vendored font first, so output is identical on every platform.
+        # Vendored Arimo (metric-compatible with Arial) first, so output is
+        # identical on every platform and matches the intended Arial layout.
+        str(_FONT_DIR / ("Arimo-Bold.ttf" if bold else "Arimo-Regular.ttf")),
+        # Vendored DejaVu as a secondary vendored fallback.
         str(_FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
-        # Fallbacks if the vendored file is somehow unavailable.
+        # System fallbacks if the vendored files are somehow unavailable.
         "arialbd.ttf" if bold else "arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
