@@ -56,6 +56,39 @@ PROJECT_STATUS_MAP = {
     },
 }
 
+# Canonical Sprint-Sheet buckets (internal keys) and their display labels.
+# These are the target categories a Jira status can be mapped to.
+BUCKET_KEYS = [
+    'not_initiated', 'in_progress', 'staging', 'qa_review',
+    'qa_deployed', 'qa_approved', 'production', 'on_hold', 'to_be_picked',
+]
+BUCKET_LABELS = {
+    'not_initiated': 'Not Initiated',
+    'in_progress':   'In Progress',
+    'staging':       'Staging',
+    'qa_review':     'QA Review',
+    'qa_deployed':   'QA Deployed',
+    'qa_approved':   'QA Approved (Completed-QA)',
+    'production':    'Production',
+    'on_hold':       'On Hold',
+    'to_be_picked':  'To Be Picked (Another Sprint)',
+}
+
+# The four % KPIs and which buckets roll into each by default.
+PCT_KEYS = ['not_initiated_pct', 'pending_pct', 'completion_qa_pct', 'production_release_pct']
+PCT_LABELS = {
+    'not_initiated_pct':      'Not Initiated %',
+    'pending_pct':            'Pending %',
+    'completion_qa_pct':      'Completion - QA %',
+    'production_release_pct': 'Production Release %',
+}
+DEFAULT_PCT_BUCKETS = {
+    'not_initiated_pct':      ['not_initiated'],
+    'pending_pct':            ['in_progress', 'staging'],
+    'completion_qa_pct':      ['qa_review', 'qa_deployed', 'qa_approved'],
+    'production_release_pct': ['production'],
+}
+
 # Project-specific: which Section 2 buckets roll up into each % KPI
 PROJECT_PCT_BUCKETS = {
     'WMP': {
@@ -99,7 +132,7 @@ def _match_status(status_val, status_list):
     return any(s.lower() in str(status_val).lower() for s in status_list)
 
 
-def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
+def parse_jira_csv(df: pd.DataFrame, project_name: str = '', status_config: dict | None = None) -> dict:
     """
     Main entry point. Takes the raw Jira DataFrame and returns a dict with:
       - hierarchy: ordered list of dicts for the Excel task table
@@ -124,6 +157,11 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
     target_end_col = 'Custom field (Target end)'
     _ensure_datetime_column(df, target_start_col, 'Target Start')
     _ensure_datetime_column(df, target_end_col, 'Target End')
+
+    # Jira Created / Updated dates - used as a fallback when the Target start/end
+    # custom fields are empty, so the report's start/end columns are never blank.
+    _ensure_datetime_column(df, 'Created')
+    _ensure_datetime_column(df, 'Updated')
 
     # Split by type
     epics_df    = df[df['Issue Type'] == 'Epic']
@@ -222,22 +260,30 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
     def count_status(status_list):
         return int(non_epic['Status'].apply(lambda s: _match_status(s, status_list)).sum())
 
-    if project_name in PROJECT_STATUS_MAP:
-        # Project-specific counting
-        bucket_map = PROJECT_STATUS_MAP[project_name]
-        pct_map    = PROJECT_PCT_BUCKETS[project_name]
+    # Resolve which status->bucket map and %-rollup to use, in priority order:
+    #   1. user-defined settings passed in via status_config (Settings page)
+    #   2. built-in map for a known project
+    #   3. global keyword fallback (the else branch below)
+    resolved_map = None
+    resolved_pct = None
+    if status_config and status_config.get('status_map'):
+        resolved_map = {str(k).lower().strip(): v for k, v in status_config['status_map'].items()}
+        resolved_pct = status_config.get('pct_buckets') or DEFAULT_PCT_BUCKETS
+    elif project_name in PROJECT_STATUS_MAP:
+        resolved_map = PROJECT_STATUS_MAP[project_name]
+        resolved_pct = PROJECT_PCT_BUCKETS[project_name]
 
-        # Zero-out all buckets
-        buckets = {b: 0 for b in [
-            'not_initiated', 'in_progress', 'staging', 'qa_review',
-            'qa_deployed', 'qa_approved', 'production', 'on_hold', 'to_be_picked'
-        ]}
+    if resolved_map is not None:
+        # Project-specific counting (built-in or user-defined)
+        pct_map = resolved_pct
 
-        # Count each item into its mapped bucket
+        # Zero-out all buckets, then count each item into its mapped bucket
+        buckets = {b: 0 for b in BUCKET_KEYS}
         for status_val in non_epic['Status']:
             key = str(status_val).lower().strip()
-            if key in bucket_map:
-                buckets[bucket_map[key]] += 1
+            bucket = resolved_map.get(key)
+            if bucket in buckets:
+                buckets[bucket] += 1
 
         not_initiated  = buckets['not_initiated']
         in_progress    = buckets['in_progress']
@@ -252,11 +298,11 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str = '') -> dict:
         def _pct(bucket_list):
             return round(sum(buckets[b] for b in bucket_list) / total * 100, 2) if total else 0
 
-        completed_qa      = sum(buckets[b] for b in pct_map['completion_qa_pct'])
-        pending_pct       = _pct(pct_map['pending_pct'])
-        not_initiated_pct = _pct(pct_map['not_initiated_pct'])
-        completion_qa_pct = _pct(pct_map['completion_qa_pct'])
-        production_pct    = _pct(pct_map['production_release_pct'])
+        completed_qa      = sum(buckets[b] for b in pct_map.get('completion_qa_pct', []))
+        pending_pct       = _pct(pct_map.get('pending_pct', []))
+        not_initiated_pct = _pct(pct_map.get('not_initiated_pct', []))
+        completion_qa_pct = _pct(pct_map.get('completion_qa_pct', []))
+        production_pct    = _pct(pct_map.get('production_release_pct', []))
 
     else:
         # Global fallback counting
@@ -332,6 +378,11 @@ def _make_row(row, level: int) -> dict:
     """Convert a DataFrame row into a clean dict for the hierarchy."""
     ts = row.get('Target Start')
     te = row.get('Target End')
+    # Fall back to Jira Created / Updated when Target start/end are empty.
+    if pd.isna(ts):
+        ts = row.get('Created')
+    if pd.isna(te):
+        te = row.get('Updated')
     return {
         'level':          level,
         'issue_key':      row['Issue key'],

@@ -13,7 +13,12 @@ import pandas as pd
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from modules.parser          import parse_jira_csv
+from modules.parser          import (
+    parse_jira_csv,
+    BUCKET_KEYS, BUCKET_LABELS,
+    PCT_KEYS, PCT_LABELS, DEFAULT_PCT_BUCKETS,
+    PROJECT_STATUS_MAP, PROJECT_PCT_BUCKETS,
+)
 from modules.excel_generator import build_excel
 from modules.pdf_generator   import build_pdf
 from modules.image_generator import build_summary_image
@@ -33,6 +38,7 @@ PROJECTS = [
 APP_DIR = Path(__file__).resolve().parent
 SPRINT_DETAILS_PATH = APP_DIR / "data" / "sprint_details.local.json"
 LEGACY_SPRINT_DETAILS_PATH = APP_DIR / "data" / "sprint_details.json"
+STATUS_MAPPINGS_PATH = APP_DIR / "data" / "status_mappings.local.json"
 
 
 def _today_ist() -> date:
@@ -124,6 +130,147 @@ def _save_project_form_data(project_name: str, form_data: dict) -> None:
         json.dump(saved, f, indent=2, sort_keys=True)
     tmp_path.replace(SPRINT_DETAILS_PATH)
     st.session_state.saved_sprint_details = saved
+
+
+def _load_status_mappings() -> dict:
+    if not STATUS_MAPPINGS_PATH.exists():
+        return {}
+    try:
+        with STATUS_MAPPINGS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_status_mappings_store(store: dict) -> None:
+    STATUS_MAPPINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = STATUS_MAPPINGS_PATH.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2, sort_keys=True)
+    tmp_path.replace(STATUS_MAPPINGS_PATH)
+    st.session_state.status_mappings = store
+
+
+def _resolve_status_config(project_name: str):
+    """Config handed to the parser: the saved user mapping if one exists,
+    else None so the parser falls back to its built-in map / global keywords."""
+    return st.session_state.get("status_mappings", {}).get(project_name)
+
+
+def _effective_status_config(project_name: str) -> dict:
+    """Starting values for the Settings editor: saved mapping, else the
+    built-in map for a known project, else an empty map with default rollups."""
+    saved = st.session_state.get("status_mappings", {}).get(project_name)
+    if saved:
+        return {
+            "status_map": dict(saved.get("status_map", {})),
+            "pct_buckets": {k: list(v) for k, v in (saved.get("pct_buckets") or DEFAULT_PCT_BUCKETS).items()},
+        }
+    if project_name in PROJECT_STATUS_MAP:
+        return {
+            "status_map": dict(PROJECT_STATUS_MAP[project_name]),
+            "pct_buckets": {k: list(v) for k, v in PROJECT_PCT_BUCKETS[project_name].items()},
+        }
+    return {
+        "status_map": {},
+        "pct_buckets": {k: list(v) for k, v in DEFAULT_PCT_BUCKETS.items()},
+    }
+
+
+def _invalidate_generated_report() -> None:
+    """Force a re-parse/re-build next time the report page is opened."""
+    for key in ("excel_bytes", "pdf_bytes", "image_bytes", "parsed_report", "parsed_kpis"):
+        st.session_state[key] = None
+
+
+def render_settings_page() -> None:
+    st.markdown('<div class="section-title">Status Mapping Settings</div>', unsafe_allow_html=True)
+    st.caption(
+        "Map each project's Jira statuses to the Sprint-Sheet buckets, and choose which "
+        "buckets roll into each % KPI. Saved mappings override the built-in defaults when "
+        "you generate a report."
+    )
+
+    project = st.selectbox(
+        "Project",
+        _project_options(),
+        key="settings_project",
+        accept_new_options=True,
+        help="Pick a project, or type a new name to configure it.",
+    )
+
+    current = _effective_status_config(project)
+    label_to_key = {BUCKET_LABELS[b]: b for b in BUCKET_KEYS}
+    bucket_labels = [BUCKET_LABELS[b] for b in BUCKET_KEYS]
+
+    # Candidate Jira statuses: from the uploaded CSV + already-mapped + manual entry.
+    detected = []
+    up_df = st.session_state.get("uploaded_df")
+    if up_df is not None and "Status" in up_df.columns:
+        source = up_df[up_df["Issue Type"] != "Epic"] if "Issue Type" in up_df.columns else up_df
+        detected = [str(s).strip() for s in source["Status"].dropna().unique() if str(s).strip()]
+    if detected:
+        st.info(f"{len(detected)} status(es) detected from the uploaded CSV.")
+    else:
+        st.info("Upload a Jira CSV on the report page to auto-detect statuses, or add them manually below.")
+
+    manual_raw = st.text_area(
+        "Add Jira statuses (one per line)",
+        key=f"settings_manual_{project}",
+        placeholder="e.g.\nIn Work\nGrooming\nReady for QA",
+    )
+    manual = [s.strip() for s in manual_raw.splitlines() if s.strip()]
+
+    # Merge into a lower-key -> display-name dict (first spelling wins for display).
+    status_display = {}
+    for s in detected + manual:
+        status_display.setdefault(s.lower(), s)
+    for lower_key in current["status_map"]:
+        status_display.setdefault(lower_key, lower_key)
+    ordered = sorted(status_display.items(), key=lambda kv: kv[1].lower())
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown("**Jira status → Sprint-Sheet bucket**")
+    if not ordered:
+        st.warning("No statuses yet. Upload a CSV or add statuses above.")
+    new_status_map = {}
+    choices = ["(ignore)"] + bucket_labels
+    for lower_key, disp in ordered:
+        cur_bucket = current["status_map"].get(lower_key)
+        default_label = BUCKET_LABELS.get(cur_bucket, "(ignore)")
+        idx = choices.index(default_label) if default_label in choices else 0
+        chosen = st.selectbox(disp, choices, index=idx, key=f"map_{project}_{lower_key}")
+        if chosen != "(ignore)":
+            new_status_map[lower_key] = label_to_key[chosen]
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown("**Which buckets roll into each % KPI**")
+    new_pct = {}
+    for pk in PCT_KEYS:
+        cur_list = current["pct_buckets"].get(pk, [])
+        default_labels = [BUCKET_LABELS[b] for b in cur_list if b in BUCKET_LABELS]
+        sel = st.multiselect(
+            PCT_LABELS[pk], bucket_labels, default=default_labels, key=f"pct_{project}_{pk}"
+        )
+        new_pct[pk] = [label_to_key[l] for l in sel]
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    save_col, reset_col = st.columns([1, 1])
+    with save_col:
+        if st.button("Save mapping", type="primary", use_container_width=True):
+            store = dict(st.session_state.get("status_mappings", {}))
+            store[project] = {"status_map": new_status_map, "pct_buckets": new_pct}
+            _save_status_mappings_store(store)
+            _invalidate_generated_report()
+            st.success(f"Saved status mapping for {project}.")
+    with reset_col:
+        if st.button("Reset to built-in / clear", use_container_width=True):
+            store = dict(st.session_state.get("status_mappings", {}))
+            store.pop(project, None)
+            _save_status_mappings_store(store)
+            _invalidate_generated_report()
+            st.rerun()
 
 
 def _report_base_name(form_data: dict) -> str:
@@ -321,6 +468,9 @@ for key, default in [
 if "saved_sprint_details" not in st.session_state:
     st.session_state.saved_sprint_details = _load_saved_sprint_details()
 
+if "status_mappings" not in st.session_state:
+    st.session_state.status_mappings = _load_status_mappings()
+
 if "project_selector" not in st.session_state:
     st.session_state.project_selector = PROJECTS[0]
 
@@ -372,8 +522,14 @@ PCT_COLORS = {
 }
 
 with st.sidebar:
+    st.radio(
+        "Page",
+        ["Generate Report", "Status Mapping Settings"],
+        key="page",
+    )
+    st.markdown("---")
     st.markdown("## Status Mapping Reference")
-    st.markdown("How Jira statuses map to the Sprint Sheet for each project.")
+    st.markdown("Built-in defaults. Edit or add projects on the **Status Mapping Settings** page.")
     st.markdown("---")
 
     for project, mappings in STATUS_MAPPING_REFERENCE.items():
@@ -407,6 +563,10 @@ with st.sidebar:
         st.markdown("---")
 
 st.markdown('<div class="header-banner"><h1>Sprint Report Generator</h1><p>Fill in sprint details - Upload your Jira CSV - Download formatted Excel and PDF reports</p></div>', unsafe_allow_html=True)
+
+if st.session_state.get("page") == "Status Mapping Settings":
+    render_settings_page()
+    st.stop()
 
 step = st.session_state.step
 
@@ -715,7 +875,7 @@ elif step == 3:
 
     if st.session_state.excel_bytes is None or st.session_state.pdf_bytes is None or st.session_state.image_bytes is None:
         with st.spinner("Parsing Jira data and building your Excel/PDF/Image report..."):
-            parsed = parse_jira_csv(df, fd['project_name'])
+            parsed = parse_jira_csv(df, fd['project_name'], _resolve_status_config(fd['project_name']))
             st.session_state.excel_bytes = build_excel(fd, parsed)
             st.session_state.pdf_bytes = build_pdf(fd, parsed)
             st.session_state.image_bytes = build_summary_image(fd, parsed)
