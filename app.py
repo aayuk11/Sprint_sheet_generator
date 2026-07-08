@@ -160,22 +160,41 @@ def _resolve_status_config(project_name: str):
 
 def _effective_status_config(project_name: str) -> dict:
     """Starting values for the Settings editor: saved mapping, else the
-    built-in map for a known project, else an empty map with default rollups."""
+    built-in map for a known project, else an empty map with default rollups.
+    `known_statuses` is the persisted comprehensive list of Jira statuses for
+    the project (including ones mapped to 'ignore'), so the full mapping table
+    survives across sessions and CSV uploads."""
     saved = st.session_state.get("status_mappings", {}).get(project_name)
     if saved:
+        smap = dict(saved.get("status_map", {}))
         return {
-            "status_map": dict(saved.get("status_map", {})),
+            "status_map": smap,
             "pct_buckets": {k: list(v) for k, v in (saved.get("pct_buckets") or DEFAULT_PCT_BUCKETS).items()},
+            "known_statuses": list(saved.get("known_statuses") or smap.keys()),
         }
     if project_name in PROJECT_STATUS_MAP:
+        smap = dict(PROJECT_STATUS_MAP[project_name])
         return {
-            "status_map": dict(PROJECT_STATUS_MAP[project_name]),
+            "status_map": smap,
             "pct_buckets": {k: list(v) for k, v in PROJECT_PCT_BUCKETS[project_name].items()},
+            "known_statuses": list(smap.keys()),
         }
     return {
         "status_map": {},
         "pct_buckets": {k: list(v) for k, v in DEFAULT_PCT_BUCKETS.items()},
+        "known_statuses": [],
     }
+
+
+def _effective_report_map(project_name: str):
+    """The status->bucket map the parser will actually use for this project:
+    saved user map if any, else the built-in map, else None (global fallback)."""
+    saved = st.session_state.get("status_mappings", {}).get(project_name)
+    if saved and saved.get("status_map"):
+        return {str(k).lower().strip(): v for k, v in saved["status_map"].items()}
+    if project_name in PROJECT_STATUS_MAP:
+        return PROJECT_STATUS_MAP[project_name]
+    return None
 
 
 def _invalidate_generated_report() -> None:
@@ -219,11 +238,16 @@ def render_settings_page() -> None:
         "Add Jira statuses (one per line)",
         key=f"settings_manual_{project}",
         placeholder="e.g.\nIn Work\nGrooming\nReady for QA",
+        help="Add every status this project's Jira workflow can have - even ones not in the "
+             "current CSV. Saved statuses persist, so future uploads use this mapping automatically.",
     )
     manual = [s.strip() for s in manual_raw.splitlines() if s.strip()]
 
     # Merge into a lower-key -> display-name dict (first spelling wins for display).
+    # Order of precedence for display casing: persisted known list, then CSV/manual.
     status_display = {}
+    for s in current.get("known_statuses", []):
+        status_display.setdefault(str(s).lower().strip(), str(s))
     for s in detected + manual:
         status_display.setdefault(s.lower(), s)
     for lower_key in current["status_map"]:
@@ -232,6 +256,8 @@ def render_settings_page() -> None:
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.markdown("**Jira status → Sprint-Sheet bucket**")
+    st.caption("Every status listed here is remembered when you save - including ones set to "
+               "\"(ignore)\" - so you only build the comprehensive mapping once.")
     if not ordered:
         st.warning("No statuses yet. Upload a CSV or add statuses above.")
     new_status_map = {}
@@ -260,10 +286,19 @@ def render_settings_page() -> None:
     with save_col:
         if st.button("Save mapping", type="primary", use_container_width=True):
             store = dict(st.session_state.get("status_mappings", {}))
-            store[project] = {"status_map": new_status_map, "pct_buckets": new_pct}
+            known = [disp for _, disp in ordered]
+            store[project] = {
+                "status_map": new_status_map,
+                "pct_buckets": new_pct,
+                "known_statuses": known,
+            }
             _save_status_mappings_store(store)
             _invalidate_generated_report()
-            st.success(f"Saved status mapping for {project}.")
+            mapped_n, total_n = len(new_status_map), len(known)
+            st.success(
+                f"Saved mapping for {project}: {mapped_n} of {total_n} status(es) mapped "
+                f"({total_n - mapped_n} ignored). Future uploads will use this automatically."
+            )
     with reset_col:
         if st.button("Reset to built-in / clear", use_container_width=True):
             store = dict(st.session_state.get("status_mappings", {}))
@@ -850,6 +885,28 @@ elif step == 2:
                 sdf = non_epic['Status'].value_counts().reset_index()
                 sdf.columns = ['Status','Count']
                 st.dataframe(sdf, use_container_width=True, hide_index=True)
+
+                # Warn only about genuinely new statuses - not ones deliberately
+                # mapped to "(ignore)" in the saved comprehensive mapping.
+                emap = _effective_report_map(fd['project_name'])
+                if emap is not None:
+                    known_lower = {
+                        str(s).lower().strip()
+                        for s in _effective_status_config(fd['project_name']).get("known_statuses", [])
+                    }
+                    unmapped = sorted({
+                        str(s).strip() for s in non_epic['Status'].dropna().unique()
+                        if str(s).strip()
+                        and str(s).lower().strip() not in emap
+                        and str(s).lower().strip() not in known_lower
+                    })
+                    if unmapped:
+                        st.warning(
+                            "New Jira statuses not yet mapped for **"
+                            f"{fd['project_name']}** (they won't be counted in the KPIs): "
+                            f"**{', '.join(unmapped)}**. Add them on the "
+                            "**Status Mapping Settings** page - they'll persist for future uploads."
+                        )
 
                 st.markdown('<div class="section-title">Data Preview (first 5 rows)</div>', unsafe_allow_html=True)
                 pcols = [c for c in ['Issue key','Issue Type','Summary','Status','Priority','Assignee','Parent key'] if c in df.columns]
