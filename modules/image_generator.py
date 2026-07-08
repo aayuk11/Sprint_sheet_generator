@@ -18,6 +18,10 @@ def _font(size: int, bold: bool = False):
     candidates = [
         "arialbd.ttf" if bold else "arial.ttf",
         "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        # Absolute paths for Linux hosts (e.g. Streamlit Cloud) where the bare
+        # font name isn't on Pillow's search path.
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     for candidate in candidates:
         try:
