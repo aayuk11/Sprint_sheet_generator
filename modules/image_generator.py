@@ -6,6 +6,7 @@ Builds a PNG image of the sprint summary block for sharing in chat/email.
 import io
 import textwrap
 from datetime import date
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -13,13 +14,17 @@ WHITE = "#FFFFFF"
 BLACK = "#000000"
 SCALE = 2
 
+# Fonts vendored in the repo so the image renders identically on every host
+# (local Windows and Linux/Streamlit Cloud) - no dependency on system fonts.
+_FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+
 
 def _font(size: int, bold: bool = False):
     candidates = [
+        # Vendored font first, so output is identical on every platform.
+        str(_FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
+        # Fallbacks if the vendored file is somehow unavailable.
         "arialbd.ttf" if bold else "arial.ttf",
-        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
-        # Absolute paths for Linux hosts (e.g. Streamlit Cloud) where the bare
-        # font name isn't on Pillow's search path.
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
@@ -28,9 +33,8 @@ def _font(size: int, bold: bool = False):
             return ImageFont.truetype(candidate, size)
         except OSError:
             continue
-    # Last resort: Pillow's built-in font. Pass `size` so it returns a scalable
-    # TrueType default (Pillow >= 10.1) instead of the tiny fixed bitmap - keeps
-    # text correctly sized even on hosts with no system fonts installed.
+    # Last resort: Pillow's built-in scalable default (Pillow >= 10.1) so text
+    # is at least correctly sized rather than the tiny fixed bitmap.
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
@@ -48,12 +52,28 @@ def _draw_cell(draw, xy, text, fill, fg=BLACK, font=None, align="center", border
     draw.rectangle([x, y, x + w, y + h], fill=fill, outline=border, width=1)
     font = font or _font(18)
     text = "" if text is None else str(text)
-    font_size = getattr(font, "size", 14)
-    max_chars = max(int(w / max(font_size * 0.58, 1)), 4)
-    lines = textwrap.wrap(text, width=max_chars) if wrap else [text]
-    if not lines:
-        lines = [""]
-    line_h = font.size + 3 if hasattr(font, "size") else 16
+    avail = max(w - 8, 4)  # inner horizontal padding
+
+    # First try to keep the text on ONE line by shrinking the font to fit the
+    # cell (down to a floor). This makes headers fit without wrapping - matching
+    # the intended layout - regardless of the font's width metrics.
+    base_size = getattr(font, "size", 14)
+    min_size = max(int(base_size * 0.6), 9)
+    if text and hasattr(font, "font_variant"):
+        size = base_size
+        while size > min_size and draw.textlength(text, font=font) > avail:
+            size -= 1
+            font = font.font_variant(size=size)
+
+    # If it still overflows and wrapping is allowed, wrap at the fitted size.
+    if text and wrap and draw.textlength(text, font=font) > avail:
+        fs = getattr(font, "size", base_size)
+        max_chars = max(int(avail / max(fs * 0.55, 1)), 4)
+        lines = textwrap.wrap(text, width=max_chars) or [text]
+    else:
+        lines = [text] if text else [""]
+
+    line_h = getattr(font, "size", 14) + 3
     total_h = len(lines) * line_h
     ty = y + max((h - total_h) / 2, 3)
     for line in lines:
