@@ -28,7 +28,13 @@ def _font(size: int, bold: bool = False):
             return ImageFont.truetype(candidate, size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    # Last resort: Pillow's built-in font. Pass `size` so it returns a scalable
+    # TrueType default (Pillow >= 10.1) instead of the tiny fixed bitmap - keeps
+    # text correctly sized even on hosts with no system fonts installed.
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def _safe_date(value) -> str:
