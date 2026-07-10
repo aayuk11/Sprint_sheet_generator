@@ -36,8 +36,8 @@ DATA_DIR = APP_DIR / "data"
 
 WORKSHEET_COLUMNS = ["store", "project", "data", "updated_at"]
 _TOMBSTONE = "__deleted__"
-# Best-effort high page size so a single fetch returns the full history.
-_FETCH_COUNT = 100000
+# Zoho Sheet fetch returns at most 1000 rows per call, so we paginate.
+_FETCH_PAGE = 1000
 
 
 def _now_iso() -> str:
@@ -144,22 +144,36 @@ class ZohoSheetBackend:
             data=data,
             timeout=30,
         )
-        resp.raise_for_status()
-        body = resp.json()
-        status = body.get("status")
-        if status not in (None, "success"):
-            raise RuntimeError(f"Zoho Sheet API error ({method}): {body}")
-        return body
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        failed = resp.status_code >= 400 or (
+            isinstance(body, dict) and body.get("status") == "failure"
+        )
+        if failed:
+            detail = json.dumps(body) if body is not None else (resp.text or "")[:400]
+            raise RuntimeError(f"Zoho Sheet {method} failed (HTTP {resp.status_code}): {detail}")
+        return body or {}
 
     def _fetch_records(self) -> list:
-        body = self._api(
-            "worksheet.records.fetch",
-            {"header_row_index": "1", "count": str(_FETCH_COUNT)},
-        )
-        return body.get("records", []) or []
+        # Paginate: Zoho returns <= 1000 rows per fetch.
+        records = []
+        start = 1
+        while True:
+            body = self._api(
+                "worksheet.records.fetch",
+                {"records_start_index": str(start), "count": str(_FETCH_PAGE)},
+            )
+            page = body.get("records", []) or []
+            records.extend(page)
+            if len(page) < _FETCH_PAGE:
+                break
+            start += len(page)
+        return records
 
     def _add_record(self, row: dict) -> None:
-        self._api("worksheet.records.add", {"records": json.dumps([row])})
+        self._api("worksheet.records.add", {"json_data": json.dumps([row])})
 
     # --- store interface -------------------------------------------------
     def load_all(self, store: str) -> dict:
