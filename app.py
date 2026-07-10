@@ -22,6 +22,7 @@ from modules.parser          import (
 from modules.excel_generator import build_excel
 from modules.pdf_generator   import build_pdf
 from modules.image_generator import build_summary_image
+from modules import store
 
 PROJECTS = [
     "PreScreening.io",
@@ -45,16 +46,37 @@ def _today_ist() -> date:
     return datetime.now(ZoneInfo("Asia/Kolkata")).date()
 
 
-def _load_saved_sprint_details() -> dict:
-    source_path = SPRINT_DETAILS_PATH if SPRINT_DETAILS_PATH.exists() else LEGACY_SPRINT_DETAILS_PATH
-    if not source_path.exists():
-        return {}
+def _load_store(name: str) -> dict:
+    """Load a store's data via the configured backend (Zoho Sheet or local
+    files). Never raises - records a message and returns {} on failure so the
+    app still runs."""
     try:
-        with source_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+        return store.get_backend().load_all(name)
+    except Exception as exc:  # network / auth / API errors
+        st.session_state["_store_error"] = f"Could not load saved data: {exc}"
         return {}
+
+
+def _save_to_store(name: str, project: str, obj) -> bool:
+    try:
+        store.get_backend().save_one(name, project, obj)
+        return True
+    except Exception as exc:
+        st.session_state["_store_error"] = f"Saved for this session, but could not persist to storage: {exc}"
+        return False
+
+
+def _delete_from_store(name: str, project: str) -> bool:
+    try:
+        store.get_backend().delete_one(name, project)
+        return True
+    except Exception as exc:
+        st.session_state["_store_error"] = f"Cleared for this session, but could not update storage: {exc}"
+        return False
+
+
+def _load_saved_sprint_details() -> dict:
+    return _load_store("sprint_details")
 
 
 def _parse_saved_date(value, fallback: date) -> date:
@@ -122,34 +144,15 @@ def _serialize_form_data(form_data: dict) -> dict:
 
 
 def _save_project_form_data(project_name: str, form_data: dict) -> None:
+    serialized = _serialize_form_data(form_data)
     saved = st.session_state.saved_sprint_details.copy()
-    saved[project_name] = _serialize_form_data(form_data)
-    SPRINT_DETAILS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = SPRINT_DETAILS_PATH.with_suffix(".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(saved, f, indent=2, sort_keys=True)
-    tmp_path.replace(SPRINT_DETAILS_PATH)
+    saved[project_name] = serialized
     st.session_state.saved_sprint_details = saved
+    _save_to_store("sprint_details", project_name, serialized)
 
 
 def _load_status_mappings() -> dict:
-    if not STATUS_MAPPINGS_PATH.exists():
-        return {}
-    try:
-        with STATUS_MAPPINGS_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _save_status_mappings_store(store: dict) -> None:
-    STATUS_MAPPINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = STATUS_MAPPINGS_PATH.with_suffix(".tmp")
-    with tmp_path.open("w", encoding="utf-8") as f:
-        json.dump(store, f, indent=2, sort_keys=True)
-    tmp_path.replace(STATUS_MAPPINGS_PATH)
-    st.session_state.status_mappings = store
+    return _load_store("status_mappings")
 
 
 def _resolve_status_config(project_name: str):
@@ -285,14 +288,16 @@ def render_settings_page() -> None:
     save_col, reset_col = st.columns([1, 1])
     with save_col:
         if st.button("Save mapping", type="primary", use_container_width=True):
-            store = dict(st.session_state.get("status_mappings", {}))
             known = [disp for _, disp in ordered]
-            store[project] = {
+            cfg = {
                 "status_map": new_status_map,
                 "pct_buckets": new_pct,
                 "known_statuses": known,
             }
-            _save_status_mappings_store(store)
+            mappings = dict(st.session_state.get("status_mappings", {}))
+            mappings[project] = cfg
+            st.session_state.status_mappings = mappings
+            _save_to_store("status_mappings", project, cfg)
             _invalidate_generated_report()
             mapped_n, total_n = len(new_status_map), len(known)
             st.success(
@@ -301,9 +306,10 @@ def render_settings_page() -> None:
             )
     with reset_col:
         if st.button("Reset to built-in / clear", use_container_width=True):
-            store = dict(st.session_state.get("status_mappings", {}))
-            store.pop(project, None)
-            _save_status_mappings_store(store)
+            mappings = dict(st.session_state.get("status_mappings", {}))
+            mappings.pop(project, None)
+            st.session_state.status_mappings = mappings
+            _delete_from_store("status_mappings", project)
             _invalidate_generated_report()
             st.rerun()
 
@@ -562,6 +568,11 @@ with st.sidebar:
         ["Generate Report", "Status Mapping Settings"],
         key="page",
     )
+    _persistent = store.backend_kind() == "ZohoSheetBackend"
+    st.caption(
+        "💾 Storage: **Zoho Sheet** (saved across restarts)" if _persistent
+        else "💾 Storage: **local files** (not persistent on Streamlit Cloud)"
+    )
     st.markdown("---")
     st.markdown("## Status Mapping Reference")
     st.markdown("Built-in defaults. Edit or add projects on the **Status Mapping Settings** page.")
@@ -598,6 +609,9 @@ with st.sidebar:
         st.markdown("---")
 
 st.markdown('<div class="header-banner"><h1>Sprint Report Generator</h1><p>Fill in sprint details - Upload your Jira CSV - Download formatted Excel and PDF reports</p></div>', unsafe_allow_html=True)
+
+if st.session_state.get("_store_error"):
+    st.warning(st.session_state["_store_error"])
 
 if st.session_state.get("page") == "Status Mapping Settings":
     render_settings_page()
