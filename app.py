@@ -284,6 +284,72 @@ def render_settings_page() -> None:
         )
         new_pct[pk] = [label_to_key[l] for l in sel]
 
+    # ---- Live preview: every final-sheet field and what currently feeds it ----
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown("**Final-sheet fields — live preview of what feeds each one**")
+    st.caption("This is exactly how your current mapping will fill the downloaded report / image.")
+
+    by_bucket = {b: [] for b in BUCKET_KEYS}
+    for lower_key, bucket in new_status_map.items():
+        if bucket in by_bucket:
+            by_bucket[bucket].append(status_display.get(lower_key, lower_key))
+
+    def _cell(text_html):
+        return (f"<td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;font-size:12px;'>"
+                f"{text_html}</td>")
+
+    def _statuses_html(names):
+        if not names:
+            return "<span style='color:#B45309;'>— none mapped —</span>"
+        return ", ".join(_html_escape(n) for n in sorted(names))
+
+    count_rows = ""
+    for b in BUCKET_KEYS:
+        count_rows += (
+            f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;"
+            f"font-size:12px;font-weight:600;'>{BUCKET_LABELS[b]}</td>"
+            f"{_cell(_statuses_html(by_bucket[b]))}</tr>"
+        )
+    st.markdown(
+        "<table style='width:100%;border-collapse:collapse;margin-bottom:10px;'>"
+        "<thead><tr style='background:#1F3864;color:white;'>"
+        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Final-sheet status field</th>"
+        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Your Jira statuses feeding it</th>"
+        f"</tr></thead><tbody>{count_rows}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+
+    pct_rows = ""
+    for pk in PCT_KEYS:
+        buckets = new_pct.get(pk, [])
+        feed = []
+        for b in buckets:
+            feed.extend(by_bucket.get(b, []))
+        bucket_html = ", ".join(BUCKET_LABELS[b] for b in buckets) or "<span style='color:#B45309;'>— none —</span>"
+        pct_rows += (
+            f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;"
+            f"font-size:12px;font-weight:600;'>{PCT_LABELS[pk]}</td>"
+            f"{_cell(bucket_html)}{_cell(_statuses_html(feed))}</tr>"
+        )
+    st.markdown(
+        "<table style='width:100%;border-collapse:collapse;'>"
+        "<thead><tr style='background:#375623;color:white;'>"
+        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Final-sheet % KPI</th>"
+        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Buckets rolled up</th>"
+        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Jira statuses feeding it</th>"
+        f"</tr></thead><tbody>{pct_rows}</tbody></table>",
+        unsafe_allow_html=True,
+    )
+
+    unmapped = [disp for lk, disp in ordered if lk not in new_status_map]
+    if unmapped:
+        st.warning(
+            "These statuses aren't mapped to any field yet, so they won't be counted: "
+            f"**{', '.join(unmapped)}**."
+        )
+    elif ordered:
+        st.success("Every listed Jira status is mapped to a final-sheet field.")
+
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     save_col, reset_col = st.columns([1, 1])
     with save_col:
