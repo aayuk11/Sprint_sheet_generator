@@ -207,12 +207,8 @@ def _invalidate_generated_report() -> None:
 
 
 def render_settings_page() -> None:
-    st.markdown('<div class="section-title">Status Mapping Settings</div>', unsafe_allow_html=True)
-    st.caption(
-        "Map each project's Jira statuses to the Sprint-Sheet buckets, and choose which "
-        "buckets roll into each % KPI. Saved mappings override the built-in defaults when "
-        "you generate a report."
-    )
+    st.markdown('<div class="section-title">Status Mapping</div>', unsafe_allow_html=True)
+    st.caption("Map each project's Jira statuses to the report fields. Set once - reused automatically.")
 
     project = st.selectbox(
         "Project",
@@ -226,43 +222,36 @@ def render_settings_page() -> None:
     label_to_key = {BUCKET_LABELS[b]: b for b in BUCKET_KEYS}
     bucket_labels = [BUCKET_LABELS[b] for b in BUCKET_KEYS]
 
-    # Candidate Jira statuses: from the uploaded CSV + already-mapped + manual entry.
-    detected = []
-    up_df = st.session_state.get("uploaded_df")
-    if up_df is not None and "Status" in up_df.columns:
-        source = up_df[up_df["Issue Type"] != "Epic"] if "Issue Type" in up_df.columns else up_df
-        detected = [str(s).strip() for s in source["Status"].dropna().unique() if str(s).strip()]
-    if detected:
-        st.info(f"{len(detected)} status(es) detected from the uploaded CSV.")
-    else:
-        st.info("Upload a Jira CSV on the report page to auto-detect statuses, or add them manually below.")
-
-    manual_raw = st.text_area(
-        "Add Jira statuses (one per line)",
-        key=f"settings_manual_{project}",
-        placeholder="e.g.\nIn Work\nGrooming\nReady for QA",
-        help="Add every status this project's Jira workflow can have - even ones not in the "
-             "current CSV. Saved statuses persist, so future uploads use this mapping automatically.",
-    )
-    manual = [s.strip() for s in manual_raw.splitlines() if s.strip()]
-
-    # Merge into a lower-key -> display-name dict (first spelling wins for display).
-    # Order of precedence for display casing: persisted known list, then CSV/manual.
+    # Candidate statuses: uploaded CSV + already-saved + manual.
     status_display = {}
     for s in current.get("known_statuses", []):
         status_display.setdefault(str(s).lower().strip(), str(s))
-    for s in detected + manual:
-        status_display.setdefault(s.lower(), s)
+    up_df = st.session_state.get("uploaded_df")
+    if up_df is not None and "Status" in up_df.columns:
+        source = up_df[up_df["Issue Type"] != "Epic"] if "Issue Type" in up_df.columns else up_df
+        for s in source["Status"].dropna().unique():
+            s = str(s).strip()
+            if s:
+                status_display.setdefault(s.lower(), s)
     for lower_key in current["status_map"]:
         status_display.setdefault(lower_key, lower_key)
+
+    # Adding statuses is tucked away - open automatically only when there are none yet.
+    with st.expander("＋ Add Jira statuses (for statuses not in the current CSV)",
+                     expanded=not status_display):
+        manual_raw = st.text_area(
+            "One status per line",
+            key=f"settings_manual_{project}",
+            placeholder="In Work\nGrooming\nReady for QA",
+        )
+    for s in [x.strip() for x in manual_raw.splitlines() if x.strip()]:
+        status_display.setdefault(s.lower(), s)
     ordered = sorted(status_display.items(), key=lambda kv: kv[1].lower())
 
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown("**Jira status → Sprint-Sheet bucket**")
-    st.caption("Every status listed here is remembered when you save - including ones set to "
-               "\"(ignore)\" - so you only build the comprehensive mapping once.")
+    # Core: one dropdown per Jira status.
+    st.markdown("**Map each Jira status to a report field**")
     if not ordered:
-        st.warning("No statuses yet. Upload a CSV or add statuses above.")
+        st.info("Upload a Jira CSV on the report page, or add statuses above, to start mapping.")
     new_status_map = {}
     choices = ["(ignore)"] + bucket_labels
     for lower_key, disp in ordered:
@@ -273,105 +262,62 @@ def render_settings_page() -> None:
         if chosen != "(ignore)":
             new_status_map[lower_key] = label_to_key[chosen]
 
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown("**Which buckets roll into each % KPI**")
-    new_pct = {}
-    for pk in PCT_KEYS:
-        cur_list = current["pct_buckets"].get(pk, [])
-        default_labels = [BUCKET_LABELS[b] for b in cur_list if b in BUCKET_LABELS]
-        sel = st.multiselect(
-            PCT_LABELS[pk], bucket_labels, default=default_labels, key=f"pct_{project}_{pk}"
-        )
-        new_pct[pk] = [label_to_key[l] for l in sel]
-
-    # ---- Live preview: every final-sheet field and what currently feeds it ----
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown("**Final-sheet fields — live preview of what feeds each one**")
-    st.caption("This is exactly how your current mapping will fill the downloaded report / image.")
-
-    by_bucket = {b: [] for b in BUCKET_KEYS}
-    for lower_key, bucket in new_status_map.items():
-        if bucket in by_bucket:
-            by_bucket[bucket].append(status_display.get(lower_key, lower_key))
-
-    def _cell(text_html):
-        return (f"<td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;font-size:12px;'>"
-                f"{text_html}</td>")
-
-    def _statuses_html(names):
-        if not names:
-            return "<span style='color:#B45309;'>— none mapped —</span>"
-        return ", ".join(_html_escape(n) for n in sorted(names))
-
-    count_rows = ""
-    for b in BUCKET_KEYS:
-        count_rows += (
-            f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;"
-            f"font-size:12px;font-weight:600;'>{BUCKET_LABELS[b]}</td>"
-            f"{_cell(_statuses_html(by_bucket[b]))}</tr>"
-        )
-    st.markdown(
-        "<table style='width:100%;border-collapse:collapse;margin-bottom:10px;'>"
-        "<thead><tr style='background:#1F3864;color:white;'>"
-        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Final-sheet status field</th>"
-        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Your Jira statuses feeding it</th>"
-        f"</tr></thead><tbody>{count_rows}</tbody></table>",
-        unsafe_allow_html=True,
-    )
-
-    pct_rows = ""
-    for pk in PCT_KEYS:
-        buckets = new_pct.get(pk, [])
-        feed = []
-        for b in buckets:
-            feed.extend(by_bucket.get(b, []))
-        bucket_html = ", ".join(BUCKET_LABELS[b] for b in buckets) or "<span style='color:#B45309;'>— none —</span>"
-        pct_rows += (
-            f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;"
-            f"font-size:12px;font-weight:600;'>{PCT_LABELS[pk]}</td>"
-            f"{_cell(bucket_html)}{_cell(_statuses_html(feed))}</tr>"
-        )
-    st.markdown(
-        "<table style='width:100%;border-collapse:collapse;'>"
-        "<thead><tr style='background:#375623;color:white;'>"
-        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Final-sheet % KPI</th>"
-        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Buckets rolled up</th>"
-        "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Jira statuses feeding it</th>"
-        f"</tr></thead><tbody>{pct_rows}</tbody></table>",
-        unsafe_allow_html=True,
-    )
-
     unmapped = [disp for lk, disp in ordered if lk not in new_status_map]
     if unmapped:
-        st.warning(
-            "These statuses aren't mapped to any field yet, so they won't be counted: "
-            f"**{', '.join(unmapped)}**."
-        )
-    elif ordered:
-        st.success("Every listed Jira status is mapped to a final-sheet field.")
+        st.caption("⚠️ Not mapped (won't be counted): " + ", ".join(unmapped))
 
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    # Advanced % rollups - hidden by default; defaults work for most projects.
+    new_pct = {pk: list(current["pct_buckets"].get(pk, [])) for pk in PCT_KEYS}
+    with st.expander("Advanced: which statuses roll into each % KPI (optional)"):
+        for pk in PCT_KEYS:
+            default_labels = [BUCKET_LABELS[b] for b in new_pct[pk] if b in BUCKET_LABELS]
+            sel = st.multiselect(
+                PCT_LABELS[pk], bucket_labels, default=default_labels, key=f"pct_{project}_{pk}"
+            )
+            new_pct[pk] = [label_to_key[l] for l in sel]
+
+    # Optional preview - hidden by default.
+    with st.expander("Preview: what feeds each report field"):
+        by_bucket = {b: [] for b in BUCKET_KEYS}
+        for lower_key, bucket in new_status_map.items():
+            if bucket in by_bucket:
+                by_bucket[bucket].append(status_display.get(lower_key, lower_key))
+        rows = ""
+        for b in BUCKET_KEYS:
+            fed = ", ".join(_html_escape(s) for s in sorted(by_bucket[b])) or "<span style='color:#B45309;'>—</span>"
+            rows += (f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;font-size:12px;"
+                     f"font-weight:600;'>{BUCKET_LABELS[b]}</td><td style='padding:5px 8px;"
+                     f"border-bottom:1px solid #E2E8F0;font-size:12px;'>{fed}</td></tr>")
+        for pk in PCT_KEYS:
+            fed = ", ".join(BUCKET_LABELS[b] for b in new_pct.get(pk, [])) or "<span style='color:#B45309;'>—</span>"
+            rows += (f"<tr><td style='padding:5px 8px;border-bottom:1px solid #E2E8F0;font-size:12px;"
+                     f"font-weight:600;color:#375623;'>{PCT_LABELS[pk]}</td><td style='padding:5px 8px;"
+                     f"border-bottom:1px solid #E2E8F0;font-size:12px;'>{fed}</td></tr>")
+        st.markdown(
+            "<table style='width:100%;border-collapse:collapse;'>"
+            "<thead><tr style='background:#1F3864;color:white;'>"
+            "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Report field</th>"
+            "<th style='padding:6px 8px;text-align:left;font-size:11px;'>Fed by</th>"
+            f"</tr></thead><tbody>{rows}</tbody></table>",
+            unsafe_allow_html=True,
+        )
+
     save_col, reset_col = st.columns([1, 1])
     with save_col:
-        if st.button("Save mapping", type="primary", use_container_width=True):
-            known = [disp for _, disp in ordered]
+        if st.button("Save", type="primary", use_container_width=True):
             cfg = {
                 "status_map": new_status_map,
                 "pct_buckets": new_pct,
-                "known_statuses": known,
+                "known_statuses": [disp for _, disp in ordered],
             }
             mappings = dict(st.session_state.get("status_mappings", {}))
             mappings[project] = cfg
             st.session_state.status_mappings = mappings
             _save_to_store("status_mappings", project, cfg)
             _invalidate_generated_report()
-            mapped_n, total_n = len(new_status_map), len(known)
-            st.success(
-                f"Saved mapping for {project}: {mapped_n} of {total_n} status(es) mapped "
-                f"({total_n - mapped_n} ignored). Future uploads will use this automatically."
-            )
+            st.success(f"Saved. {len(new_status_map)} status(es) mapped for {project}.")
     with reset_col:
-        if st.button("Reset to built-in / clear", use_container_width=True):
+        if st.button("Reset", use_container_width=True):
             mappings = dict(st.session_state.get("status_mappings", {}))
             mappings.pop(project, None)
             st.session_state.status_mappings = mappings
@@ -640,39 +586,7 @@ with st.sidebar:
         else "💾 Storage: **local files** (not persistent on Streamlit Cloud)"
     )
     st.markdown("---")
-    st.markdown("## Status Mapping Reference")
-    st.markdown("Built-in defaults. Edit or add projects on the **Status Mapping Settings** page.")
-    st.markdown("---")
-
-    for project, mappings in STATUS_MAPPING_REFERENCE.items():
-        st.markdown(f"### {project}")
-        rows_html = ""
-        for jira_status, bucket, pct_col in mappings:
-            b_color  = BUCKET_COLORS.get(bucket,  "#94A3B8")
-            p_color  = PCT_COLORS.get(pct_col,    "#94A3B8")
-            rows_html += f"""
-            <tr>
-                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">{jira_status}</td>
-                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">
-                    <span style="background:{b_color};color:white;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">{bucket}</span>
-                </td>
-                <td style="padding:6px 8px;font-size:12px;border-bottom:1px solid #E2E8F0;">
-                    <span style="background:{p_color};color:white;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">{pct_col}</span>
-                </td>
-            </tr>"""
-        st.markdown(f"""
-        <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
-            <thead>
-                <tr style="background:#1F3864;">
-                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Jira Status</th>
-                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Sprint Sheet Status</th>
-                    <th style="padding:7px 8px;font-size:11px;color:white;text-align:left;">Contributes To</th>
-                </tr>
-            </thead>
-            <tbody>{rows_html}</tbody>
-        </table>
-        """, unsafe_allow_html=True)
-        st.markdown("---")
+    st.caption("Configure how Jira statuses fill the report on the **Status Mapping Settings** page.")
 
 st.markdown('<div class="header-banner"><h1>Sprint Report Generator</h1><p>Fill in sprint details - Upload your Jira CSV - Download formatted Excel and PDF reports</p></div>', unsafe_allow_html=True)
 
