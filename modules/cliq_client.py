@@ -85,10 +85,17 @@ class CliqClient:
         resp = requests.get(url, headers=self._headers(), timeout=30)
         if resp.status_code >= 400:
             raise RuntimeError(f"Cliq channel lookup failed (HTTP {resp.status_code}): {(resp.text or '')[:400]}")
-        data = resp.json()
-        chat_id = data.get("chat_id") or (data.get("channel") or {}).get("chat_id")
+        body = resp.json()
+        # Channel details are nested under "data" (e.g. {"type":"channel","data":{"chat_id":...}}).
+        chat_id = None
+        for container in (body.get("data"), body.get("channel"), body):
+            if isinstance(container, dict) and container.get("chat_id"):
+                chat_id = container["chat_id"]
+                break
         if not chat_id:
-            raise RuntimeError(f"No chat_id found for channel '{channel_unique_name}'.")
+            raise RuntimeError(
+                f"No chat_id found for channel '{channel_unique_name}' (response: {str(body)[:200]})."
+            )
         return chat_id
 
     def post_message(self, chat_id: str, text: str) -> None:
