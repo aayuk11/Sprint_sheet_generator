@@ -24,6 +24,7 @@ from modules.pdf_generator   import build_pdf
 from modules.image_generator import build_summary_image
 from modules import store
 from modules import jira_client
+from modules import cliq_client
 
 PROJECTS = [
     "PreScreening.io",
@@ -1073,6 +1074,43 @@ elif step == 3:
         _render_multi_file_download_button([download_files[option] for option in selected_formats])
     else:
         st.markdown('<div class="val-error">Select at least one file type to download.</div>', unsafe_allow_html=True)
+
+    # ---- Post to Zoho Cliq channel ----
+    if cliq_client.is_configured():
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-title">Post to Zoho Cliq</div>', unsafe_allow_html=True)
+        saved_channel = _load_store("zoho_channels").get(fd['project_name'], "")
+        ch1, ch2 = st.columns([3, 1])
+        with ch1:
+            channel = st.text_input(
+                "Cliq channel (unique name)", value=saved_channel,
+                key=f"cliq_channel_{fd['project_name']}",
+                placeholder="e.g. wmp-sprint-reports",
+                help="The channel's unique name from its URL/settings. Saved per project.",
+            )
+        with ch2:
+            st.write("")
+            if st.button("Save channel", use_container_width=True, disabled=not channel.strip()):
+                _save_to_store("zoho_channels", fd['project_name'], channel.strip())
+                st.success("Channel saved.")
+        if st.button("Post report to Cliq", type="primary", disabled=not channel.strip()):
+            _save_to_store("zoho_channels", fd['project_name'], channel.strip())
+            message = (
+                f"*Sprint {fd['sprint_number']} report — {fd['project_name']}*\n"
+                f"Action Items: {kpis['action_items']} | Pending: {kpis['pending_pct']} | "
+                f"Not Initiated: {kpis['not_initiated_pct']} | Production: {kpis['production_release_pct']}\n"
+                f"Scrum Master: {fd['scrum_master']}"
+            )
+            files = [download_files["Excel"], download_files["PDF"], download_files["Image"]]
+            try:
+                with st.spinner("Posting to Zoho Cliq..."):
+                    warnings = cliq_client.post_report(channel.strip(), files, message)
+                if warnings:
+                    st.warning("Message posted, but some files failed:\n\n" + "\n\n".join(warnings))
+                else:
+                    st.success(f"Posted the report (message + 3 files) to #{channel.strip()}.")
+            except Exception as exc:
+                st.error(f"Could not post to Cliq: {exc}")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     _, reset_col = st.columns([2, 1])
