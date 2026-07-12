@@ -23,6 +23,7 @@ from modules.excel_generator import build_excel
 from modules.pdf_generator   import build_pdf
 from modules.image_generator import build_summary_image
 from modules import store
+from modules import jira_client
 
 PROJECTS = [
     "PreScreening.io",
@@ -204,6 +205,19 @@ def _invalidate_generated_report() -> None:
     """Force a re-parse/re-build next time the report page is opened."""
     for key in ("excel_bytes", "pdf_bytes", "image_bytes", "parsed_report", "parsed_kpis"):
         st.session_state[key] = None
+
+
+def _ingest_dataframe(df, source_label: str) -> bool:
+    """Validate and accept a DataFrame (from CSV upload OR a Jira fetch) as the
+    working dataset, then invalidate any previously generated report."""
+    missing = [c for c in ["Issue key", "Issue Type", "Summary", "Status"] if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns: {', '.join(missing)}")
+        return False
+    st.session_state.uploaded_df = df
+    st.session_state.uploaded_source = source_label
+    _invalidate_generated_report()
+    return True
 
 
 def render_settings_page() -> None:
@@ -851,65 +865,95 @@ elif step == 2:
     sc[3].metric("Total Days",   fd['total_days'])
     sc[4].metric("Scrum Master", fd['scrum_master'])
 
+    proj = fd['project_name']
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Upload Jira CSV Export</div>', unsafe_allow_html=True)
-    st.markdown('<div class="info-pill">In Jira: Board -> Export Issues -> CSV (all fields). Required columns: <b>Issue key, Issue Type, Summary, Status</b>. Recommended: Priority, Assignee, Parent key, Target start/end.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Get Jira Data</div>', unsafe_allow_html=True)
 
+    # ---- Option 1: fetch directly from Jira (if configured) ----
+    if jira_client.is_configured():
+        saved_q = _load_store("jira_config").get(proj, {})
+        with st.expander("🔗 Fetch from Jira (saved filter or JQL)", expanded=bool(saved_q)):
+            mode_label = st.radio(
+                "Query type", ["Saved filter ID", "JQL"],
+                index=0 if saved_q.get("mode", "filter") == "filter" else 1,
+                horizontal=True, key=f"jira_mode_{proj}",
+            )
+            value = st.text_input(
+                "Filter ID or JQL", value=saved_q.get("value", ""), key=f"jira_value_{proj}",
+                placeholder="e.g.  12345   (filter id)   —or—   project = WMP AND sprint in openSprints()",
+            )
+            query = {"mode": "filter" if mode_label == "Saved filter ID" else "jql", "value": value}
+            fc1, fc2 = st.columns([1, 1])
+            with fc1:
+                if st.button("Fetch from Jira", type="primary", use_container_width=True,
+                             disabled=not value.strip()):
+                    _save_to_store("jira_config", proj, query)  # remember for next time
+                    try:
+                        with st.spinner("Fetching issues from Jira..."):
+                            jdf = jira_client.fetch_issues(query)
+                        if _ingest_dataframe(jdf, f"Jira • {len(jdf)} issues"):
+                            st.success(f"Fetched {len(jdf)} issues from Jira.")
+                    except Exception as exc:
+                        st.error(f"Jira fetch failed: {exc}")
+            with fc2:
+                if st.button("Save query", use_container_width=True, disabled=not value.strip()):
+                    _save_to_store("jira_config", proj, query)
+                    st.success("Saved - this query is remembered for this project.")
+    else:
+        st.caption("💡 Add a `[jira]` section to Streamlit secrets to enable one-click **Fetch from Jira**.")
+
+    # ---- Option 2: upload a CSV export (always available) ----
+    st.markdown('<div class="info-pill">Or upload a Jira CSV export (all fields). Required: <b>Issue key, Issue Type, Summary, Status</b>.</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Drop your Jira CSV here", type=["csv"], label_visibility="collapsed")
-
     if uploaded_file:
         try:
-            df = pd.read_csv(uploaded_file)
-            missing = [c for c in ['Issue key','Issue Type','Summary','Status'] if c not in df.columns]
-            if missing:
-                st.error(f"Missing columns: {', '.join(missing)}")
-            else:
-                st.session_state.uploaded_df = df
-                epics   = len(df[df['Issue Type']=='Epic'])
-                stories = len(df[df['Issue Type'].isin(['Story','Task'])])
-                subs    = len(df[df['Issue Type']=='Sub-task'])
-                st.success(f"**{uploaded_file.name}** uploaded - {len(df)} rows")
-                pc = st.columns(4)
-                pc[0].metric("Total Rows",len(df)); pc[1].metric("Epics",epics)
-                pc[2].metric("Stories/Tasks",stories); pc[3].metric("Sub-tasks",subs)
-
-                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-                st.markdown('<div class="section-title">Status Breakdown Preview</div>', unsafe_allow_html=True)
-                non_epic = df[df['Issue Type']!='Epic']
-                sdf = non_epic['Status'].value_counts().reset_index()
-                sdf.columns = ['Status','Count']
-                st.dataframe(sdf, use_container_width=True, hide_index=True)
-
-                # Warn only about genuinely new statuses - not ones deliberately
-                # mapped to "(ignore)" in the saved comprehensive mapping.
-                emap = _effective_report_map(fd['project_name'])
-                if emap is not None:
-                    known_lower = {
-                        str(s).lower().strip()
-                        for s in _effective_status_config(fd['project_name']).get("known_statuses", [])
-                    }
-                    unmapped = sorted({
-                        str(s).strip() for s in non_epic['Status'].dropna().unique()
-                        if str(s).strip()
-                        and str(s).lower().strip() not in emap
-                        and str(s).lower().strip() not in known_lower
-                    })
-                    if unmapped:
-                        st.warning(
-                            "New Jira statuses not yet mapped for **"
-                            f"{fd['project_name']}** (they won't be counted in the KPIs): "
-                            f"**{', '.join(unmapped)}**. Add them on the "
-                            "**Status Mapping Settings** page - they'll persist for future uploads."
-                        )
-
-                st.markdown('<div class="section-title">Data Preview (first 5 rows)</div>', unsafe_allow_html=True)
-                pcols = [c for c in ['Issue key','Issue Type','Summary','Status','Priority','Assignee','Parent key'] if c in df.columns]
-                st.dataframe(df[pcols].head(5), use_container_width=True, hide_index=True)
+            _ingest_dataframe(pd.read_csv(uploaded_file), uploaded_file.name)
         except Exception as e:
             st.error(f"Could not read CSV: {e}")
 
+    # ---- Shared preview (whichever source loaded the data) ----
+    df = st.session_state.uploaded_df
+    if df is not None:
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.success(f"Loaded: **{st.session_state.get('uploaded_source', 'data')}** — {len(df)} rows")
+        epics   = len(df[df['Issue Type'] == 'Epic'])
+        stories = len(df[df['Issue Type'].isin(['Story', 'Task'])])
+        subs    = len(df[df['Issue Type'] == 'Sub-task'])
+        pc = st.columns(4)
+        pc[0].metric("Total Rows", len(df)); pc[1].metric("Epics", epics)
+        pc[2].metric("Stories/Tasks", stories); pc[3].metric("Sub-tasks", subs)
+
+        st.markdown('<div class="section-title">Status Breakdown Preview</div>', unsafe_allow_html=True)
+        non_epic = df[df['Issue Type'] != 'Epic']
+        sdf = non_epic['Status'].value_counts().reset_index()
+        sdf.columns = ['Status', 'Count']
+        st.dataframe(sdf, use_container_width=True, hide_index=True)
+
+        # Warn only about genuinely new statuses (not deliberately ignored ones).
+        emap = _effective_report_map(proj)
+        if emap is not None:
+            known_lower = {
+                str(s).lower().strip()
+                for s in _effective_status_config(proj).get("known_statuses", [])
+            }
+            unmapped = sorted({
+                str(s).strip() for s in non_epic['Status'].dropna().unique()
+                if str(s).strip()
+                and str(s).lower().strip() not in emap
+                and str(s).lower().strip() not in known_lower
+            })
+            if unmapped:
+                st.warning(
+                    f"New Jira statuses not yet mapped for **{proj}** (won't be counted): "
+                    f"**{', '.join(unmapped)}**. Map them on the **Status Mapping Settings** page."
+                )
+
+        st.markdown('<div class="section-title">Data Preview (first 5 rows)</div>', unsafe_allow_html=True)
+        pcols = [c for c in ['Issue key', 'Issue Type', 'Summary', 'Status', 'Priority', 'Assignee', 'Parent key'] if c in df.columns]
+        st.dataframe(df[pcols].head(5), use_container_width=True, hide_index=True)
+
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-    b1, b2 = st.columns([1,3])
+    b1, b2 = st.columns([1, 3])
     with b1:
         if st.button("<- Back"):
             st.session_state.step = 1; st.rerun()
@@ -917,7 +961,7 @@ elif step == 2:
         if st.button("Generate Excel/PDF Report", disabled=(st.session_state.uploaded_df is None)):
             st.session_state.step = 3; st.rerun()
     if st.session_state.uploaded_df is None:
-        st.markdown('<div class="val-error">Please upload a Jira CSV file first.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="val-error">Fetch from Jira or upload a CSV to continue.</div>', unsafe_allow_html=True)
 
 # STEP 3
 elif step == 3:
