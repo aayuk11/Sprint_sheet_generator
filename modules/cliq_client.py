@@ -76,18 +76,33 @@ class CliqClient:
     def _headers(self) -> dict:
         return {"Authorization": f"Zoho-oauthtoken {self._access_token()}"}
 
-    def post_message(self, channel: str, text: str) -> None:
+    def resolve_chat_id(self, channel_unique_name: str) -> str:
+        """A channel's messages/files are posted via its chat_id. Look it up
+        from the channel's unique name (needs ZohoCliq.Channels.READ)."""
         import requests
 
-        url = f"{self.api_host}/api/v2/channelsbyname/{channel}/message"
+        url = f"{self.api_host}/api/v2/channelsbyname/{channel_unique_name}"
+        resp = requests.get(url, headers=self._headers(), timeout=30)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Cliq channel lookup failed (HTTP {resp.status_code}): {(resp.text or '')[:400]}")
+        data = resp.json()
+        chat_id = data.get("chat_id") or (data.get("channel") or {}).get("chat_id")
+        if not chat_id:
+            raise RuntimeError(f"No chat_id found for channel '{channel_unique_name}'.")
+        return chat_id
+
+    def post_message(self, chat_id: str, text: str) -> None:
+        import requests
+
+        url = f"{self.api_host}/api/v2/chats/{chat_id}/message"
         resp = requests.post(url, headers=self._headers(), json={"text": text}, timeout=30)
         if resp.status_code >= 400:
             raise RuntimeError(f"Cliq message failed (HTTP {resp.status_code}): {(resp.text or '')[:400]}")
 
-    def upload_file(self, channel: str, filename: str, data: bytes, mime: str) -> None:
+    def upload_file(self, chat_id: str, filename: str, data: bytes, mime: str) -> None:
         import requests
 
-        url = f"{self.api_host}/api/v2/channelsbyname/{channel}/files"
+        url = f"{self.api_host}/api/v2/chats/{chat_id}/files"
         resp = requests.post(
             url, headers=self._headers(),
             files={"file": (filename, data, mime)}, timeout=60,
@@ -96,27 +111,23 @@ class CliqClient:
             raise RuntimeError(f"Cliq upload '{filename}' failed (HTTP {resp.status_code}): {(resp.text or '')[:400]}")
 
 
-@st.cache_resource(show_spinner=False)
-def _client():
-    cfg = _cfg()
-    return CliqClient(cfg) if cfg else None
-
-
 def post_report(channel: str, files: list, message: str) -> list:
-    """files: list of (filename, bytes, mime). Posts the message, then uploads
-    each file. Returns a list of warning strings (empty = all succeeded).
-    Raises only if Cliq is unconfigured, the channel is missing, or the message
-    itself cannot be posted."""
-    client = _client()
-    if client is None:
+    """channel = channel unique name. files = list of (filename, bytes, mime).
+    Resolves the channel's chat_id, posts the message, then uploads each file.
+    Returns a list of warning strings (empty = all succeeded). A fresh client is
+    built each call so an updated refresh_token/secret takes effect immediately."""
+    cfg = _cfg()
+    if cfg is None:
         raise RuntimeError("Zoho Cliq is not configured. Add a [cliq] section to Streamlit secrets.")
     if not channel:
         raise RuntimeError("No Zoho Cliq channel is set for this project.")
-    client.post_message(channel, message)
+    client = CliqClient(cfg)
+    chat_id = client.resolve_chat_id(channel)
+    client.post_message(chat_id, message)
     warnings = []
     for filename, data, mime in files:
         try:
-            client.upload_file(channel, filename, data, mime)
+            client.upload_file(chat_id, filename, data, mime)
         except Exception as exc:
             warnings.append(str(exc))
     return warnings
