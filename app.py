@@ -1093,24 +1093,39 @@ elif step == 3:
             if st.button("Save channel", use_container_width=True, disabled=not channel.strip()):
                 _save_to_store("zoho_channels", fd['project_name'], channel.strip())
                 st.success("Channel saved.")
-        if st.button("Post report to Cliq", type="primary", disabled=not channel.strip()):
+        include_summary = st.checkbox(
+            "Also post a summary message",
+            value=False,
+            help="Off = post only the selected files. On = also post the KPI summary text.",
+        )
+        st.caption('Posts the files ticked above in "Select files to download".')
+        post_disabled = (not channel.strip()) or (not selected_formats)
+        if st.button("Post selected files to Cliq", type="primary", disabled=post_disabled):
             _save_to_store("zoho_channels", fd['project_name'], channel.strip())
-            message = (
-                f"*Sprint {fd['sprint_number']} report — {fd['project_name']}*\n"
-                f"Action Items: {kpis['action_items']} | Pending: {kpis['pending_pct']} | "
-                f"Not Initiated: {kpis['not_initiated_pct']} | Production: {kpis['production_release_pct']}\n"
-                f"Scrum Master: {fd['scrum_master']}"
-            )
-            files = [download_files["Excel"], download_files["PDF"], download_files["Image"]]
+            message = ""
+            if include_summary:
+                message = (
+                    f"*Sprint {fd['sprint_number']} report — {fd['project_name']}*\n"
+                    f"Action Items: {kpis['action_items']} | Pending: {kpis['pending_pct']} | "
+                    f"Not Initiated: {kpis['not_initiated_pct']} | Production: {kpis['production_release_pct']}\n"
+                    f"Scrum Master: {fd['scrum_master']}"
+                )
+            files = [download_files[option] for option in selected_formats]
             try:
                 with st.spinner("Posting to Zoho Cliq..."):
                     warnings = cliq_client.post_report(channel.strip(), files, message)
                 if warnings:
-                    st.warning("Message posted, but some files failed:\n\n" + "\n\n".join(warnings))
+                    st.warning("Posted, but some files failed:\n\n" + "\n\n".join(warnings))
                 else:
-                    st.success(f"Posted the report (message + 3 files) to #{channel.strip()}.")
+                    st.success(
+                        f"Posted {len(files)} file(s) to #{channel.strip()}: {', '.join(selected_formats)}"
+                        + (" (with summary)" if include_summary else "")
+                        + "."
+                    )
             except Exception as exc:
                 st.error(f"Could not post to Cliq: {exc}")
+        if not selected_formats:
+            st.caption("Select at least one file above to enable posting.")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     _, reset_col = st.columns([2, 1])

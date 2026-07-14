@@ -118,11 +118,12 @@ class CliqClient:
             raise RuntimeError(f"Cliq upload '{filename}' failed (HTTP {resp.status_code}): {(resp.text or '')[:400]}")
 
 
-def post_report(channel: str, files: list, message: str) -> list:
+def post_report(channel: str, files: list, message: str = "") -> list:
     """channel = channel unique name. files = list of (filename, bytes, mime).
-    Resolves the channel's chat_id, posts the message, then uploads each file.
-    Returns a list of warning strings (empty = all succeeded). A fresh client is
-    built each call so an updated refresh_token/secret takes effect immediately."""
+    Resolves the channel's chat_id, optionally posts a message (skipped when
+    empty), then uploads each file. Returns a list of warning strings (empty =
+    all succeeded). A fresh client is built each call so an updated
+    refresh_token/secret takes effect immediately."""
     cfg = _cfg()
     if cfg is None:
         raise RuntimeError("Zoho Cliq is not configured. Add a [cliq] section to Streamlit secrets.")
@@ -130,7 +131,8 @@ def post_report(channel: str, files: list, message: str) -> list:
         raise RuntimeError("No Zoho Cliq channel is set for this project.")
     client = CliqClient(cfg)
     chat_id = client.resolve_chat_id(channel)
-    client.post_message(chat_id, message)
+    if message:
+        client.post_message(chat_id, message)
     warnings = []
     for filename, data, mime in files:
         try:
