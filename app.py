@@ -286,15 +286,100 @@ def _new_kpi(idx: int, label: str = "", color: str | None = None, bucket_keys=No
             "bucket_keys": list(bucket_keys or [])}
 
 
-def _default_seed_config() -> dict:
-    """Sensible starting point for a brand-new project - editable immediately."""
-    b0, b1, b2 = _new_bucket(0, "Not Started"), _new_bucket(1, "In Progress"), _new_bucket(2, "Done")
-    return {
-        "buckets": [b0, b1, b2],
-        "kpis": [_new_kpi(0, "Completion %", bucket_keys=[b2["key"]])],
-        "status_map": {},
-        "known_statuses": [],
-    }
+# ---- Built-in defaults (used until a project is explicitly saved in Settings) -
+# So existing/unconfigured projects keep the full standard KPIs & buckets - no
+# disruption. Editing a project in Settings overrides these.
+
+# Standard Product-sprint status map (mirrors the old keyword defaults).
+_PRODUCT_DEFAULT_STATUS_MAP = {
+    "to do": "not_initiated", "not initiated": "not_initiated", "open": "not_initiated",
+    "in progress": "in_progress",
+    "staging deployed": "staging", "staging": "staging", "stage deployed": "staging",
+    "qa review": "qa_review", "in review": "qa_review",
+    "qa deployed": "qa_deployed",
+    "qa approved": "qa_approved", "qa": "qa_approved",
+    "done": "production", "production": "production", "released": "production", "closed": "production",
+    "on hold": "on_hold", "blocked": "on_hold",
+    "to be picked in another sprint": "to_be_picked", "deferred": "to_be_picked",
+}
+
+# The three projects whose maps used to be hard-coded - preserved exactly.
+_BUILTIN_PROJECT_MAPS = {
+    "WMP": {
+        "status_map": {"to do": "not_initiated", "grooming completed": "not_initiated",
+                       "in progress": "in_progress", "staging deployed": "staging",
+                       "qa": "qa_approved", "done": "production"},
+        "pct_buckets": {"pending_pct": ["in_progress", "staging"], "not_initiated_pct": ["not_initiated"],
+                        "completion_qa_pct": ["qa_approved"], "production_release_pct": ["production"]},
+    },
+    "SATOC": {
+        "status_map": {"to do": "not_initiated", "in progress": "in_progress",
+                       "stage deployed": "staging", "qa review": "qa_review", "done": "production"},
+        "pct_buckets": {"pending_pct": ["in_progress"], "not_initiated_pct": ["not_initiated"],
+                        "completion_qa_pct": ["staging", "qa_review"], "production_release_pct": ["production"]},
+    },
+    "PreScreening.io": {
+        "status_map": {"grooming completed": "not_initiated", "to do": "not_initiated",
+                       "in progress": "in_progress", "stage deployed": "staging",
+                       "qa deployed": "qa_deployed", "done": "production"},
+        "pct_buckets": {"pending_pct": ["in_progress", "staging"], "not_initiated_pct": ["not_initiated"],
+                        "completion_qa_pct": ["qa_deployed"], "production_release_pct": ["production"]},
+    },
+}
+
+# Product Design (Design sprint) default bucket/KPI set.
+_DESIGN_DEFAULT = {
+    "buckets": [
+        {"key": "bucket_0", "label": "Not Initiated",   "color": "#ED7D31"},
+        {"key": "bucket_1", "label": "In Progress",     "color": "#f0e600"},
+        {"key": "bucket_2", "label": "Completed",       "color": "#3bbf00"},
+        {"key": "bucket_3", "label": "Document Pending","color": "#bdbbbb"},
+        {"key": "bucket_4", "label": "On Hold",         "color": "#515251"},
+        {"key": "bucket_5", "label": "Rework",          "color": "#00b0a6"},
+        {"key": "bucket_6", "label": "Wireframe Ready", "color": "#5edecf"},
+        {"key": "bucket_7", "label": "In Review",       "color": "#3386d8"},
+    ],
+    "kpis": [
+        {"key": "kpi_0", "label": "Completion %",    "color": "#3bbf00", "bucket_keys": ["bucket_2"]},
+        {"key": "kpi_1", "label": "Pending %",       "color": "#e6e200",
+         "bucket_keys": ["bucket_1", "bucket_3", "bucket_4", "bucket_5", "bucket_6"]},
+        {"key": "kpi_2", "label": "Not Initiated %", "color": "#ed7d31", "bucket_keys": ["bucket_0"]},
+        {"key": "kpi_3", "label": "In Review %",     "color": "#3386d8", "bucket_keys": ["bucket_7"]},
+    ],
+    "status_map": {
+        "completed": "bucket_2", "document pending": "bucket_3", "documentation pending": "bucket_3",
+        "in progress": "bucket_1", "in review": "bucket_7", "not initiated": "bucket_0",
+        "on hold": "bucket_4", "rework": "bucket_5", "wireframe ready": "bucket_6",
+    },
+    "known_statuses": ["Completed", "Document Pending", "Documentation Pending", "In Progress",
+                       "In Review", "Not Initiated", "On Hold", "Rework", "Wireframe Ready"],
+}
+
+
+def _product_default_config() -> dict:
+    """Full standard Product-sprint config (old 9 buckets / 4 % KPIs)."""
+    known = [s.title() for s in dict.fromkeys(_PRODUCT_DEFAULT_STATUS_MAP)]
+    return _migrate_one_status_mapping(
+        {"status_map": dict(_PRODUCT_DEFAULT_STATUS_MAP), "pct_buckets": {}, "known_statuses": known}
+    )
+
+
+def _default_config_for(project_name: str) -> dict:
+    """The default config for a project that hasn't been saved in Settings yet.
+    Design project -> Design set; the 3 legacy projects -> their old maps;
+    everything else -> the full standard Product set. Never the empty seed."""
+    if project_name == DESIGN_PROJECT:
+        return {
+            "buckets": [dict(b) for b in _DESIGN_DEFAULT["buckets"]],
+            "kpis": [dict(k) for k in _DESIGN_DEFAULT["kpis"]],
+            "status_map": dict(_DESIGN_DEFAULT["status_map"]),
+            "known_statuses": list(_DESIGN_DEFAULT["known_statuses"]),
+        }
+    builtin = _BUILTIN_PROJECT_MAPS.get(project_name)
+    if builtin:
+        known = [s.title() for s in builtin["status_map"]]
+        return _migrate_one_status_mapping({**builtin, "known_statuses": known})
+    return _product_default_config()
 
 
 def _effective_project_config(project_name: str) -> dict:
@@ -306,7 +391,7 @@ def _effective_project_config(project_name: str) -> dict:
             "status_map": dict(cfg.get("status_map", {})),
             "known_statuses": list(cfg.get("known_statuses", [])),
         }
-    return _default_seed_config()
+    return _default_config_for(project_name)
 
 
 def _next_seq(rows: list, prefix: str) -> int:
