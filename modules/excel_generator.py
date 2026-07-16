@@ -1,68 +1,51 @@
 """
 excel_generator.py
 Builds the complete Sprint Report Excel file:
-  - Sprint Summary block (rows 1-14) at the top
+  - Sprint Summary block at the top (sprint meta, KPI %, bucket counts, goals)
   - Full Epic -> Story/Task -> Subtask hierarchy table below
+
+Summary-block columns and their colors come entirely from the project's
+configured buckets/KPIs (see modules/parser.py / modules/store.py) - any
+number of them lays out correctly, nothing is a fixed set of columns.
 """
 
 import io
-from datetime import date
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 JIRA_BASE = "https://jira-zigram.atlassian.net/browse"
 
-# Colour constants
-WHITE   = 'FFFFFF'
-BLACK   = '000000'
+WHITE = 'FFFFFF'
+BLACK = '000000'
 
-# Summary block header colours
-C_SPRINT_NO   = '000000'
-C_START       = '1F4E79'
-C_DEV         = '2E75B6'
-C_QA          = '00B0F0'
-C_PROD        = 'C00000'
-C_END         = '375623'
-C_DAYS        = '595959'
-C_SCRUM       = '7030A0'
-C_KPI_AI      = '1F3864'
-C_KPI_PEND    = 'FFC000'
-C_KPI_NOTINIT = 'ED7D31'
-C_KPI_PRODPCT = '375623'
-C_GOAL        = '7030A0'
-C_MAJOR       = '1F3864'
+C_SPRINT_NO = '000000'
+C_DAYS      = '595959'
+C_KPI_AI    = '1F3864'
+C_GOAL      = '7030A0'
+C_MAJOR     = '1F3864'
 
-# Status breakdown colours
-C_PENDING_AI  = 'F4B942'
-C_NOTINIT     = 'ED7D31'
-C_INPROG      = '00B0F0'
-C_STAGING     = 'BF8F00'
-C_QAREVIEW    = 'FFC000'
-C_QADEP       = '70AD47'
-C_QAAPP       = '00B050'
-C_PRODUCTION  = '375623'
-C_ONHOLD      = 'A6A6A6'
-C_ANOTHER     = '7030A0'
-
-# Hierarchy row colours
-EPIC_BG   = 'C39BD3'
-STORY_BG  = '2E75B6'
-SUB_BG    = 'D9E2F3'
-
-# Status cell colours
-STATUS_DONE    = ('C6EFCE', '375623')
-STATUS_INPROG  = ('FFEB9C', '7F6000')
-STATUS_TODO    = ('FCE4D6', '9C0006')
-STATUS_STAGING = ('FFF2CC', '7F6000')
+EPIC_BG  = 'C39BD3'
+DEFAULT_STATUS_FILL = 'FCE4D6'
 
 
-# Style helpers
+def _hex(color: str) -> str:
+    return color.strip("#").upper()
+
+
+def _luminance(hex_color: str) -> float:
+    v = _hex(hex_color)
+    r, g, b = int(v[0:2], 16) / 255, int(v[2:4], 16) / 255, int(v[4:6], 16) / 255
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+def _contrast_fg(hex_color: str) -> str:
+    return BLACK if _luminance(hex_color) > 0.55 else WHITE
+
 
 def _hdr(bg, fg=WHITE, bold=True, sz=9):
     return dict(
         font      = Font(bold=bold, color=fg, name='Arial', size=sz),
-        fill      = PatternFill('solid', start_color=bg),
+        fill      = PatternFill('solid', start_color=_hex(bg)),
         alignment = Alignment(horizontal='center', vertical='center', wrap_text=True),
         border    = Border(
             left=Side(style='thin', color='FFFFFF'),
@@ -77,7 +60,7 @@ def _val(bg=WHITE, fg=BLACK, bold=False, sz=10, h='center'):
     thin = Side(style='thin', color='CCCCCC')
     return dict(
         font      = Font(bold=bold, color=fg, name='Arial', size=sz),
-        fill      = PatternFill('solid', start_color=bg),
+        fill      = PatternFill('solid', start_color=_hex(bg)),
         alignment = Alignment(horizontal=h, vertical='center', wrap_text=True),
         border    = Border(left=thin, right=thin, top=thin, bottom=thin),
     )
@@ -88,13 +71,39 @@ def _apply(cell, style: dict):
         setattr(cell, k, v)
 
 
-def _blank_row(ws, row, cols, bg='F2F2F2', height=6):
+def _blank_row(ws, row, n_cols, bg='F2F2F2', height=6):
     ws.row_dimensions[row].height = height
-    for col in cols:
-        ws[f'{col}{row}'].fill = PatternFill('solid', start_color=bg)
+    for col_idx in range(1, n_cols + 1):
+        ws.cell(row, col_idx).fill = PatternFill('solid', start_color=bg)
 
 
-# Main builder
+def _write_item_grid(ws, start_row, items, n_cols_min=10):
+    """items: list of (label, value, color). Two rows per grid (header+value),
+    wraps into another header/value pair if there are more items than columns.
+    Returns the row number after the last grid written."""
+    row = start_row
+    n_cols = min(n_cols_min, len(items)) if items else 0
+    idx = 0
+    while idx < len(items):
+        chunk = items[idx:idx + n_cols_min] if len(items) > n_cols_min else items
+        for col_idx, (label, value, color) in enumerate(chunk, 1):
+            hc = ws.cell(row, col_idx)
+            hc.value = label
+            _apply(hc, _hdr(color))
+        ws.row_dimensions[row].height = 28
+        row += 1
+        for col_idx, (label, value, color) in enumerate(chunk, 1):
+            vc = ws.cell(row, col_idx)
+            vc.value = value
+            _apply(vc, _val(WHITE, BLACK, True, 11))
+        ws.row_dimensions[row].height = 22
+        row += 1
+        idx += len(chunk)
+        if idx < len(items):
+            _blank_row(ws, row, n_cols)
+            row += 1
+    return row, n_cols
+
 
 def build_excel(form_data: dict, parsed: dict) -> bytes:
     wb = Workbook()
@@ -102,232 +111,136 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
     ws.title = f"Sprint {form_data['sprint_number']} - Report"
 
     kpis      = parsed['kpis']
+    buckets   = parsed['buckets']
+    kpi_defs  = parsed['kpi_defs']
+    status_map = parsed['status_map']
+    bucket_colors = {b['key']: b['color'] for b in buckets}
+    bucket_counts = kpis['bucket_counts']
+    kpi_values = kpis['kpi_values']
     hierarchy = parsed['hierarchy']
     fd        = form_data
 
-    daily_task = round(kpis['action_items'] / fd['total_days'], 2) \
-        if fd['total_days'] > 0 else 0
+    daily_task = round(kpis['action_items'] / fd['total_days'], 2) if fd['total_days'] > 0 else 0
 
-    ALL_COLS   = ['A','B','C','D','E','F','G','H','I','J','K']
-    META_COLS  = ['A','B','C','D','E','F','G','H','I','J']
-    STAT_COLS  = ALL_COLS
+    # Meta fields differ by sprint type (Product has Dev/QA/Prod releases,
+    # Design has a single Release Date) - app.py builds the right set.
+    meta_items = fd.get('meta_items') or []
+    row, n_cols = _write_item_grid(ws, 1, meta_items)
+    _blank_row(ws, row, n_cols)
+    row += 1
 
-    meta_hdrs = [
-        ('A1', 'Sprint Number',              C_SPRINT_NO),
-        ('B1', 'Sprint Start Date',          C_START),
-        ('C1', 'Sprint Development Release', C_DEV),
-        ('D1', 'Sprint QA Release',          C_QA),
-        ('E1', 'Production Release',         C_PROD),
-        ('F1', 'Tech Debt Release',          C_PROD),
-        ('G1', 'Sprint End Date',            C_END),
-        ('H1', 'Total No. of Days',          C_DAYS),
-        ('I1', 'Scrum Master',               C_SCRUM),
-        ('J1', 'Grooming session',           C_SCRUM),
-    ]
-    for ref, label, bg in meta_hdrs:
-        c = ws[ref]; c.value = label; _apply(c, _hdr(bg))
-    ws.row_dimensions[1].height = 28
+    kpi_items = [('No of Days Left in Sprint', fd['days_left'], C_SPRINT_NO),
+                 ('Action Items', kpis['action_items'], C_KPI_AI)]
+    for k in kpi_defs:
+        v = kpi_values.get(k['key'], {'pct_display': '0%'})
+        kpi_items.append((k['label'], v['pct_display'], k['color']))
+    row, n_cols_kpi = _write_item_grid(ws, row, kpi_items)
+    _blank_row(ws, row, max(n_cols, n_cols_kpi))
+    row += 1
 
-    meta_vals = {
-        'A2': fd['sprint_number'],
-        'B2': fd['sprint_start'].strftime('%d %b %Y'),
-        'C2': fd['dev_release'].strftime('%d %b %Y'),
-        'D2': fd['qa_release'].strftime('%d %b %Y'),
-        'E2': fd['prod_release'].strftime('%d %b %Y'),
-        'F2': '',                                       # Tech Debt Release - logic TBD
-        'G2': fd['sprint_end'].strftime('%d %b %Y'),
-        'H2': fd['total_days'],
-        'I2': fd['scrum_master'],
-        'J2': '',                                       # Grooming session - logic TBD
-    }
-    for ref, val in meta_vals.items():
-        c = ws[ref]; c.value = val; _apply(c, _val('FFF2CC', BLACK, True, 10))
-    ws.row_dimensions[2].height = 22
+    stat_items = [('Daily Task Count', daily_task, C_DAYS)]
+    for b in buckets:
+        stat_items.append((b['label'], bucket_counts.get(b['key'], 0), b['color']))
+    row, n_cols_stat = _write_item_grid(ws, row, stat_items)
+    _blank_row(ws, row, max(n_cols, n_cols_kpi, n_cols_stat))
+    row += 1
 
-    _blank_row(ws, 3, META_COLS)
+    total_cols = max(n_cols, n_cols_kpi, n_cols_stat, 2)
+    c = ws.cell(row, 1); c.value = 'Sprint Goal'; _apply(c, _hdr(C_GOAL))
+    c = ws.cell(row, 2); c.value = 'Major Sprint Items'; _apply(c, _hdr(C_MAJOR))
+    for col_idx in range(3, total_cols + 1):
+        ws.cell(row, col_idx).fill = PatternFill('solid', start_color='F2F2F2')
+    ws.row_dimensions[row].height = 24
+    goal_hdr_row = row
+    row += 1
 
-    kpi_hdrs = [
-        ('A4', 'No of Days Left in Sprint', C_SPRINT_NO),
-        ('B4', 'Action Items',              C_KPI_AI),
-        ('C4', 'Completed - QA',            C_QAAPP),
-        ('D4', 'Completion - QA %',         C_QAAPP),
-        ('E4', 'Pending %',                 C_KPI_PEND),
-        ('F4', 'Not Initiated %',           C_KPI_NOTINIT),
-        ('G4', 'Production Release %',      C_KPI_PRODPCT),
-        ('H4', '',                          'D9D9D9'),
-        ('I4', '',                          'D9D9D9'),
-        ('J4', '',                          'D9D9D9'),
-    ]
-    for ref, label, bg in kpi_hdrs:
-        c = ws[ref]; c.value = label; _apply(c, _hdr(bg))
-    ws.row_dimensions[4].height = 28
-
-    kpi_vals = {
-        'A5': fd['days_left'],
-        'B5': kpis['action_items'],
-        'C5': kpis['completed_qa'],
-        'D5': kpis['completion_qa_pct'],
-        'E5': kpis['pending_pct'],
-        'F5': kpis['not_initiated_pct'],
-        'G5': kpis['production_release_pct'],
-    }
-    for ref, val in kpi_vals.items():
-        c = ws[ref]; c.value = val; _apply(c, _val(WHITE, BLACK, True, 11))
-    for col in ['H','I','J']:
-        ws[f'{col}5'].fill = PatternFill('solid', start_color='F2F2F2')
-    ws.row_dimensions[5].height = 22
-
-    _blank_row(ws, 6, META_COLS)
-
-    stat_hdrs = [
-        ('A7', 'Daily Task Count',              C_DAYS),
-        ('B7', 'Pending Action Items',          C_PENDING_AI),
-        ('C7', 'Not Initiated',                 C_NOTINIT),
-        ('D7', 'In Progress',                   C_INPROG),
-        ('E7', 'Staging',                       C_STAGING),
-        ('F7', 'QA Review',                     C_QAREVIEW),
-        ('G7', 'QA Deployed',                   C_QADEP),
-        ('H7', 'QA Approved',                   C_QAAPP),
-        ('I7', 'Production',                    C_PRODUCTION),
-        ('J7', 'On Hold',                       C_ONHOLD),
-        ('K7', 'To Be Picked In Another Sprint',C_ANOTHER),
-    ]
-    for ref, label, bg in stat_hdrs:
-        c = ws[ref]; c.value = label; _apply(c, _hdr(bg))
-    ws.row_dimensions[7].height = 36
-
-    stat_vals = {
-        'A8': daily_task,
-        'B8': kpis['pending_action_items'],
-        'C8': kpis['not_initiated'],
-        'D8': kpis['in_progress'],
-        'E8': kpis['staging'],
-        'F8': kpis['qa_review'],
-        'G8': kpis['qa_deployed'],
-        'H8': kpis['qa_approved'],
-        'I8': kpis['production'],
-        'J8': kpis['on_hold'],
-        'K8': kpis['to_be_picked'],
-    }
-    for ref, val in stat_vals.items():
-        c = ws[ref]; c.value = val; _apply(c, _val(WHITE, BLACK, True, 11))
-    ws.row_dimensions[8].height = 22
-
-    _blank_row(ws, 9, STAT_COLS)
-
-    c = ws['A10']; c.value = 'Sprint Goal';      _apply(c, _hdr(C_GOAL))
-    c = ws['B10']; c.value = 'Major Sprint Items'; _apply(c, _hdr(C_MAJOR))
-    for col in ['C','D','E','F','G','H','I','J','K']:
-        ws[f'{col}10'].fill = PatternFill('solid', start_color='F2F2F2')
-    ws.row_dimensions[10].height = 24
-
-    for i, (row, val_a, val_b) in enumerate([
-        (11, fd['sprint_goal'],  fd['major_item_1']),
-        (12, '',                 fd['major_item_2']),
-        (13, '',                 fd['major_item_3']),
+    for i, (val_a, val_b) in enumerate([
+        (fd['sprint_goal'], fd['major_item_1']),
+        ('', fd['major_item_2']),
+        ('', fd['major_item_3']),
     ]):
-        ca = ws[f'A{row}']; ca.value = val_a
+        ca = ws.cell(row, 1); ca.value = val_a
         _apply(ca, _val('FAE5D3' if i == 0 else 'F2F2F2', BLACK, False, 9, 'left'))
-
-        cb = ws[f'B{row}']; cb.value = val_b
+        cb = ws.cell(row, 2); cb.value = val_b
         _apply(cb, _val('FFF2CC', BLACK, False, 9, 'left'))
-
-        for col in ['C','D','E','F','G','H','I','J','K']:
-            ws[f'{col}{row}'].fill = PatternFill('solid', start_color='F2F2F2')
+        for col_idx in range(3, total_cols + 1):
+            ws.cell(row, col_idx).fill = PatternFill('solid', start_color='F2F2F2')
         ws.row_dimensions[row].height = 20
+        row += 1
 
-    ws.row_dimensions[14].height = 14
-    ws['A14'].value = 'Yellow = Manual Input | Auto-calculated fields derived from Jira CSV'
-    ws['A14'].font  = Font(name='Arial', size=8, italic=True, color='595959')
+    ws.row_dimensions[row].height = 14
+    ws.cell(row, 1).value = 'Yellow = Manual Input | Auto-calculated fields derived from Jira CSV'
+    ws.cell(row, 1).font = Font(name='Arial', size=8, italic=True, color='595959')
+    row += 1
 
-    # Columns: S.No | Issue Key | Jira Link | Issue Type | Summary | Status |
-    #          Priority | Assignee | Start Date | End Date |
-    #          Revised Start Date | Revised End Date | Comment
+    task_start_row = row + 1
+    label_header = form_data.get('label_header', 'Label')
     task_headers = [
-        'S.No',
-        'Issue Key',
-        'Jira Link / Confluence Document Link',
-        'Issue Type',
-        'Summary / Title',
-        'Status',
-        'Priority',
-        'Assignee',
-        'Start Date',
-        'End Date',
-        'Revised Start Date',
-        'Revised End Date',
-        'Comment',
+        'S.No', 'Issue Key', 'Jira Link / Confluence Document Link', 'Issue Type',
+        'Summary / Title', 'Status', 'Priority', 'Assignee', 'Start Date', 'End Date',
+        'Revised Start Date', 'Revised End Date', 'Comment', label_header,
     ]
     for col_idx, label in enumerate(task_headers, 1):
-        c = ws.cell(15, col_idx)
+        c = ws.cell(task_start_row, col_idx)
         c.value = label
         _apply(c, _hdr('D1BBF0', fg='4A235A'))
-    ws.row_dimensions[15].height = 28
+    ws.row_dimensions[task_start_row].height = 28
 
     thin_g = Side(style='thin', color='CCCCCC')
     border_epic = Border(
-        left=Side(style='medium', color='C39BD3'),
-        right=Side(style='medium', color='C39BD3'),
-        top=Side(style='medium', color='C39BD3'),
-        bottom=Side(style='medium', color='C39BD3'),
+        left=Side(style='medium', color='C39BD3'), right=Side(style='medium', color='C39BD3'),
+        top=Side(style='medium', color='C39BD3'), bottom=Side(style='medium', color='C39BD3'),
     )
     border_sub = Border(left=thin_g, right=thin_g, top=thin_g, bottom=thin_g)
 
     rows_with_spacers = []
     for i, item in enumerate(hierarchy):
         rows_with_spacers.append(item)
-        if i + 1 < len(hierarchy) and hierarchy[i+1]['level'] == 0:
+        if i + 1 < len(hierarchy) and hierarchy[i + 1]['level'] == 0:
             rows_with_spacers.append(None)
 
-    # Pre-compute S.No for every item
-    epic_counter  = 0
+    epic_counter = 0
     story_counter = 0
-    sub_counters  = {}   # parent_story_idx -> sub count
-
-    last_epic_num  = 0
+    sub_counters = {}
+    last_epic_num = 0
     last_story_num = 0
-    last_story_key = None   # track which story we're under for sub numbering
+    last_story_key = None
 
     for item in rows_with_spacers:
         if item is None:
-            item_sno = ''
+            continue
         elif item['level'] == 0:
-            epic_counter  += 1
-            story_counter  = 0
+            epic_counter += 1
+            story_counter = 0
             last_story_key = None
-            item_sno       = str(epic_counter)
-            last_epic_num  = epic_counter
+            item['sno'] = str(epic_counter)
+            last_epic_num = epic_counter
         elif item['level'] == 1:
             story_counter += 1
             last_story_key = item['issue_key']
             sub_counters[last_story_key] = 0
-            item_sno = f"{last_epic_num}.{story_counter}"
+            item['sno'] = f"{last_epic_num}.{story_counter}"
             last_story_num = story_counter
-        else:  # level == 2  (sub-task)
+        else:
             if last_story_key and last_story_key in sub_counters:
                 sub_counters[last_story_key] += 1
                 sub_num = sub_counters[last_story_key]
             else:
                 sub_num = 1
-            item_sno = f"{last_epic_num}.{last_story_num}.{sub_num}"
+            item['sno'] = f"{last_epic_num}.{last_story_num}.{sub_num}"
 
-        if item is not None:
-            item['sno'] = item_sno
-
-    # Write rows
-    current_row = 16
+    current_row = task_start_row + 1
     for item in rows_with_spacers:
-
         if item is None:
             ws.row_dimensions[current_row].height = 8
-            for col in range(1, 14):
+            for col in range(1, 15):
                 ws.cell(current_row, col).fill = PatternFill('solid', start_color='FFFFFF')
             current_row += 1
             continue
 
         level = item['level']
-        ik    = item['issue_key']
-        url   = f"{JIRA_BASE}/{ik}"
+        ik = item['issue_key']
+        url = f"{JIRA_BASE}/{ik}"
 
         if level == 0:
             summary_disp = item['summary'].upper()
@@ -344,81 +257,50 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
 
         ws.row_dimensions[current_row].height = row_h
 
-        # col index:  1        2    3    4               5             6
         row_data = [
-            item.get('sno', ''),
-            ik,
-            url,
-            item['issue_type'],
-            summary_disp,
-            item['status'],
-            item['priority'],
-            item['assignee'],
-            item['target_start'],
-            item['target_end'],
-            '',   # Revised Start Date (empty)
-            '',   # Revised End Date   (empty)
-            item.get('latest_comment', ''),
+            item.get('sno', ''), ik, url, item['issue_type'], summary_disp,
+            item['status'], item['priority'], item['assignee'],
+            item['target_start'], item['target_end'], '', '',
+            item.get('latest_comment', ''), item.get('labels', ''),
         ]
 
-        # Summary=col5, Comment=col13, wrap text on both
-        WRAP_COLS   = {5, 13}
-        # URL is col 3, Status is col 6
-        URL_COL     = 3
-        STATUS_COL  = 6
+        WRAP_COLS = {5, 13, 14}
+        URL_COL = 3
+        STATUS_COL = 6
+
+        bucket_key = status_map.get(str(item['status']).lower().strip())
+        status_fill = _hex(bucket_colors.get(bucket_key, DEFAULT_STATUS_FILL))
+        status_fg = _contrast_fg(status_fill)
 
         for col_idx, val in enumerate(row_data, 1):
             cell = ws.cell(current_row, col_idx)
             cell.alignment = Alignment(vertical='center', wrap_text=(col_idx in WRAP_COLS))
-            cell.border    = border_epic if level == 0 else border_sub
+            cell.border = border_epic if level == 0 else border_sub
 
             if col_idx == URL_COL:
-                cell.value     = val
-                cell.hyperlink = val
-                cell.font      = Font(bold=False, color='4472C4', name='Arial',
-                                      size=sz, underline='single')
-                cell.fill      = PatternFill('solid', start_color=bg)
-
-            elif col_idx == STATUS_COL:
-                sv = str(item['status'])
-                if any(s in sv for s in ['Done', 'DONE', 'Production', 'Released']):
-                    sc = STATUS_DONE
-                elif any(s in sv for s in ['Progress', 'IN PROGRESS']):
-                    sc = STATUS_INPROG
-                elif any(s in sv for s in ['Staging', 'STAGING']):
-                    sc = STATUS_STAGING
-                else:
-                    sc = STATUS_TODO
                 cell.value = val
-                cell.fill  = PatternFill('solid', start_color=sc[0])
-                cell.font  = Font(bold=True, name='Arial', size=sz, color=sc[1])
-
+                cell.hyperlink = val
+                cell.font = Font(bold=False, color='4472C4', name='Arial', size=sz, underline='single')
+                cell.fill = PatternFill('solid', start_color=bg)
+            elif col_idx == STATUS_COL:
+                cell.value = val
+                cell.fill = PatternFill('solid', start_color=status_fill)
+                cell.font = Font(bold=True, name='Arial', size=sz, color=status_fg)
             else:
                 cell.value = val
-                cell.font  = Font(bold=bold, color=fg, name='Arial', size=sz)
-                cell.fill  = PatternFill('solid', start_color=bg)
+                cell.font = Font(bold=bold, color=fg, name='Arial', size=sz)
+                cell.fill = PatternFill('solid', start_color=bg)
 
         current_row += 1
 
     col_widths = {
-        'A':  8,   # S.No
-        'B': 14,   # Issue Key
-        'C': 50,   # Jira Link / Confluence Document Link
-        'D': 14,   # Issue Type
-        'E': 58,   # Summary / Title
-        'F': 16,   # Status
-        'G': 13,   # Priority
-        'H': 24,   # Assignee
-        'I': 16,   # Start Date
-        'J': 16,   # End Date
-        'K': 18,   # Revised Start Date
-        'L': 18,   # Revised End Date
-        'M': 60,   # Comment
+        'A': 8, 'B': 14, 'C': 50, 'D': 14, 'E': 58, 'F': 16, 'G': 13,
+        'H': 24, 'I': 16, 'J': 16, 'K': 18, 'L': 18, 'M': 60, 'N': 24,
     }
     for col, w in col_widths.items():
         ws.column_dimensions[col].width = w
 
-    ws.freeze_panes = 'A16'
+    ws.freeze_panes = f'A{task_start_row + 1}'
 
     buf = io.BytesIO()
     wb.save(buf)

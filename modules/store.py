@@ -1,12 +1,13 @@
 """
 store.py
-Persistent storage for saved sprint details and per-project status mappings.
+Persistent storage for saved sprint details and per-project report configs
+(buckets, KPIs, status mapping).
 
 On Streamlit Community Cloud the local filesystem is wiped whenever the app
-sleeps, reboots, or redeploys, so anything written to local JSON files is lost.
-This module persists that data to a **Zoho Sheet** when Zoho credentials are
-present in Streamlit secrets, and falls back to local JSON files otherwise (so
-local development keeps working with no credentials).
+sleeps, reboots, or redeploys, so anything written to local JSON files is
+lost. This module persists data to a **Zoho Sheet** when Zoho credentials are
+present in Streamlit secrets, and falls back to local JSON files otherwise
+(so local development keeps working with no credentials).
 
 Design note - the Zoho backend is intentionally **append-only** and uses only
 the two Zoho Sheet operations that are unambiguously documented,
@@ -16,10 +17,6 @@ fragile update / delete-by-criteria API:
   * every save appends a row  (store, project, data, updated_at)
   * on load, the newest row per (store, project) wins
   * a delete appends a tombstone row (data = "__deleted__")
-
-Rows accumulate slowly (a handful per week for a sprint tool); if the sheet ever
-grows very large it can be cleared and the app will simply re-persist on the
-next save.
 """
 
 from __future__ import annotations
@@ -34,9 +31,7 @@ import streamlit as st
 APP_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = APP_DIR / "data"
 
-WORKSHEET_COLUMNS = ["store", "project", "data", "updated_at"]
 _TOMBSTONE = "__deleted__"
-# Zoho Sheet fetch returns at most 1000 rows per call, so we paginate.
 _FETCH_PAGE = 1000
 
 
@@ -45,28 +40,15 @@ def _now_iso() -> str:
 
 
 class LocalFileBackend:
-    """Stores each logical store as a dict[project] -> obj in a JSON file.
-    Mirrors the app's original on-disk format for seamless local development."""
-
-    FILES = {
-        "sprint_details": DATA_DIR / "sprint_details.local.json",
-        "status_mappings": DATA_DIR / "status_mappings.local.json",
-    }
-    LEGACY = {
-        "sprint_details": DATA_DIR / "sprint_details.json",
-    }
+    """Stores each logical store as a dict[project] -> obj in a JSON file."""
 
     def _path(self, store: str) -> Path:
-        return self.FILES.get(store, DATA_DIR / f"{store}.local.json")
+        return DATA_DIR / f"{store}.local.json"
 
     def load_all(self, store: str) -> dict:
         path = self._path(store)
         if not path.exists():
-            legacy = self.LEGACY.get(store)
-            if legacy and legacy.exists():
-                path = legacy
-            else:
-                return {}
+            return {}
         try:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -108,7 +90,6 @@ class ZohoSheetBackend:
         self._token = None
         self._token_exp = 0.0
 
-    # --- OAuth -----------------------------------------------------------
     def _access_token(self) -> str:
         import requests
 
@@ -157,7 +138,6 @@ class ZohoSheetBackend:
         return body or {}
 
     def _fetch_records(self) -> list:
-        # Paginate: Zoho returns <= 1000 rows per fetch.
         records = []
         start = 1
         while True:
@@ -175,7 +155,6 @@ class ZohoSheetBackend:
     def _add_record(self, row: dict) -> None:
         self._api("worksheet.records.add", {"json_data": json.dumps([row])})
 
-    # --- store interface -------------------------------------------------
     def load_all(self, store: str) -> dict:
         latest: dict[str, tuple[str, str]] = {}
         for rec in self._fetch_records():

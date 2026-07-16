@@ -22,7 +22,7 @@ import streamlit as st
 # appended once resolved.
 _BASE_FIELDS = [
     "summary", "issuetype", "status", "priority",
-    "assignee", "parent", "created", "updated", "comment",
+    "assignee", "parent", "created", "updated", "comment", "labels",
 ]
 
 
@@ -121,6 +121,7 @@ def _issue_to_row(issue: dict, start_field, end_field) -> dict:
         "Created": f.get("created"),
         "Updated": f.get("updated"),
         "Comment": _latest_comment_text(f),
+        "Labels": ", ".join(str(x).strip() for x in (f.get("labels") or []) if str(x).strip()),
     }
 
 

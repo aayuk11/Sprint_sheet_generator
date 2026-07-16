@@ -1,11 +1,14 @@
 """
 image_generator.py
-Builds a PNG image of the sprint summary block for sharing in chat/email.
+Builds a PNG image of the sprint summary block for sharing in chat.
+
+Rows are laid out generically from lists of (label, value, color) tuples, so
+a project's configured buckets/KPIs (any count, any labels/colors) render
+correctly - nothing here is tied to a fixed set of statuses.
 """
 
 import io
 import textwrap
-from datetime import date
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -13,20 +16,16 @@ from PIL import Image, ImageDraw, ImageFont
 WHITE = "#FFFFFF"
 BLACK = "#000000"
 SCALE = 2
+CELL_W = 150
+MAX_PER_ROW = 10
 
-# Fonts vendored in the repo so the image renders identically on every host
-# (local Windows and Linux/Streamlit Cloud) - no dependency on system fonts.
 _FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
 
 def _font(size: int, bold: bool = False):
     candidates = [
-        # Vendored Arimo (metric-compatible with Arial) first, so output is
-        # identical on every platform and matches the intended Arial layout.
         str(_FONT_DIR / ("Arimo-Bold.ttf" if bold else "Arimo-Regular.ttf")),
-        # Vendored DejaVu as a secondary vendored fallback.
         str(_FONT_DIR / ("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf")),
-        # System fallbacks if the vendored files are somehow unavailable.
         "arialbd.ttf" if bold else "arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -36,30 +35,19 @@ def _font(size: int, bold: bool = False):
             return ImageFont.truetype(candidate, size)
         except OSError:
             continue
-    # Last resort: Pillow's built-in scalable default (Pillow >= 10.1) so text
-    # is at least correctly sized rather than the tiny fixed bitmap.
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
         return ImageFont.load_default()
 
 
-def _safe_date(value) -> str:
-    if isinstance(value, date):
-        return value.strftime("%d %b %Y")
-    return "" if value is None else str(value)
-
-
-def _draw_cell(draw, xy, text, fill, fg=BLACK, font=None, align="center", border="#C9CED6", wrap=True):
+def _draw_cell(draw, xy, text, fill, fg=BLACK, font=None, align="center", border="#C9CED6"):
     x, y, w, h = xy
     draw.rectangle([x, y, x + w, y + h], fill=fill, outline=border, width=1)
     font = font or _font(18)
     text = "" if text is None else str(text)
-    avail = max(w - 8, 4)  # inner horizontal padding
+    avail = max(w - 8, 4)
 
-    # First try to keep the text on ONE line by shrinking the font to fit the
-    # cell (down to a floor). This makes headers fit without wrapping - matching
-    # the intended layout - regardless of the font's width metrics.
     base_size = getattr(font, "size", 14)
     min_size = max(int(base_size * 0.6), 9)
     if text and hasattr(font, "font_variant"):
@@ -68,8 +56,7 @@ def _draw_cell(draw, xy, text, fill, fg=BLACK, font=None, align="center", border
             size -= 1
             font = font.font_variant(size=size)
 
-    # If it still overflows and wrapping is allowed, wrap at the fitted size.
-    if text and wrap and draw.textlength(text, font=font) > avail:
+    if text and draw.textlength(text, font=font) > avail:
         fs = getattr(font, "size", base_size)
         max_chars = max(int(avail / max(fs * 0.55, 1)), 4)
         lines = textwrap.wrap(text, width=max_chars) or [text]
@@ -98,81 +85,72 @@ def _row(draw, y, widths, values, fills, height, font, text_colors=None, aligns=
         x += width
 
 
+def _chunk(items, n):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
+def _draw_item_grid(draw, y, items, row_h, header_font, value_font, cell_w=CELL_W, max_per_row=MAX_PER_ROW):
+    """items: list of (label, value, color). Wraps into multiple grid rows."""
+    for chunk in _chunk(items, max_per_row):
+        widths = [cell_w * SCALE] * len(chunk)
+        labels = [it[0] for it in chunk]
+        values = [it[1] for it in chunk]
+        colors = [it[2] for it in chunk]
+        _row(draw, y, widths, labels, colors, row_h, header_font, text_colors=[WHITE] * len(labels))
+        y += row_h
+        _row(draw, y, widths, values, [WHITE] * len(values), row_h, value_font)
+        y += row_h + (6 * SCALE)
+    return y
+
+
 def build_summary_image(form_data: dict, parsed: dict) -> bytes:
     kpis = parsed["kpis"]
-    width = 1728 * SCALE
+    buckets = parsed["buckets"]
+    kpi_defs = parsed["kpi_defs"]
+    bucket_counts = kpis["bucket_counts"]
+    kpi_values = kpis["kpi_values"]
+
+    daily_task = round(kpis["action_items"] / form_data["total_days"], 2) if form_data["total_days"] > 0 else 0
+
+    # Meta fields differ by sprint type (Product has Dev/QA/Prod releases,
+    # Design has a single Release Date) - app.py builds the right set.
+    meta_items = form_data.get("meta_items") or []
+    kpi_items = [("No of Days Left in Sprint", form_data["days_left"], "#000000"),
+                 ("Action Items", kpis["action_items"], "#1F3864")]
+    for k in kpi_defs:
+        v = kpi_values.get(k["key"], {"pct_display": "0%"})
+        kpi_items.append((k["label"], v["pct_display"], k["color"]))
+
+    stat_items = [("Daily Task Count", daily_task, "#595959")]
+    for b in buckets:
+        stat_items.append((b["label"], bucket_counts.get(b["key"], 0), b["color"]))
+
+    n_meta_rows = -(-len(meta_items) // MAX_PER_ROW)
+    n_kpi_rows = -(-len(kpi_items) // MAX_PER_ROW)
+    n_stat_rows = -(-len(stat_items) // MAX_PER_ROW)
     row_h = 30 * SCALE
     major_h = 38 * SCALE
-    height = 360 * SCALE
+    block_gap = 6 * SCALE
+    height = (
+        (n_meta_rows + n_kpi_rows + n_stat_rows) * (2 * row_h + block_gap)
+        + row_h + major_h * 3 + 40 * SCALE
+    )
+    width = CELL_W * MAX_PER_ROW * SCALE
 
-    image = Image.new("RGB", (width, height), "#F2F2F2")
+    image = Image.new("RGB", (width, int(height)), "#F2F2F2")
     draw = ImageDraw.Draw(image)
 
     header_font = _font(12 * SCALE, bold=True)
     value_font = _font(13 * SCALE, bold=True)
-    small_font = _font(11 * SCALE, bold=True)
     body_font = _font(11 * SCALE)
 
-    meta_w = [w * SCALE for w in [202, 234, 288, 80, 334, 92, 75, 139, 92, 92]]
-    meta_headers = [
-        "Sprint Number", "Sprint Start Date", "Sprint Development Release", "Sprint QA Release",
-        "Production Release", "Tech Debt Release", "Sprint End Date", "Total No. of Days",
-        "Scrum Master", "Grooming session",
-    ]
-    meta_values = [
-        form_data["sprint_number"],
-        _safe_date(form_data["sprint_start"]),
-        _safe_date(form_data["dev_release"]),
-        _safe_date(form_data["qa_release"]),
-        _safe_date(form_data["prod_release"]),
-        "",
-        _safe_date(form_data["sprint_end"]),
-        form_data["total_days"],
-        form_data["scrum_master"],
-        "",
-    ]
-    meta_colors = ["#000000", "#1F4E79", "#2E75B6", "#00B0F0", "#C00000", "#C00000", "#375623", "#595959", "#7030A0", "#7030A0"]
     y = 0
-    _row(draw, y, meta_w, meta_headers, meta_colors, row_h, header_font, text_colors=[WHITE] * len(meta_headers))
-    y += row_h
-    _row(draw, y, meta_w, meta_values, ["#FFF2CC"] * len(meta_values), row_h, value_font)
-    y += row_h + (6 * SCALE)
+    y = _draw_item_grid(draw, y, meta_items, row_h, header_font, value_font)
+    y = _draw_item_grid(draw, y, kpi_items, row_h, header_font, value_font)
+    y = _draw_item_grid(draw, y, stat_items, row_h, header_font, value_font)
 
-    kpi_w = [w * SCALE for w in [202, 234, 288, 80, 334, 92, 75, 139, 92, 92]]
-    kpi_headers = [
-        "No of Days Left in Sprint", "Action Items", "Completed - QA", "Completion - QA %",
-        "Pending %", "Not Initiated %", "Production Release %", "", "", "",
-    ]
-    kpi_values = [
-        form_data["days_left"], kpis["action_items"], kpis["completed_qa"],
-        kpis["completion_qa_pct"], kpis["pending_pct"], kpis["not_initiated_pct"],
-        kpis["production_release_pct"], "", "", "",
-    ]
-    kpi_colors = ["#000000", "#1F3864", "#00B050", "#00B050", "#FFC000", "#ED7D31", "#375623", "#D9D9D9", "#D9D9D9", "#D9D9D9"]
-    _row(draw, y, kpi_w, kpi_headers, kpi_colors, row_h, header_font, text_colors=[WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, WHITE, BLACK, BLACK, BLACK])
-    y += row_h
-    _row(draw, y, kpi_w, kpi_values, [WHITE] * len(kpi_values), row_h, value_font)
-    y += row_h + (6 * SCALE)
-
-    stat_w = [w * SCALE for w in [202, 234, 288, 80, 334, 92, 75, 139, 92, 92, 92]]
-    daily_task = round(kpis["action_items"] / form_data["total_days"], 2) if form_data["total_days"] > 0 else 0
-    stat_headers = [
-        "Daily Task Count", "Pending Action Items", "Not Initiated", "In Progress", "Staging",
-        "QA Review", "QA Deployed", "QA Approved", "Production", "On Hold",
-        "To Be Picked In Another Sprint",
-    ]
-    stat_values = [
-        daily_task, kpis["pending_action_items"], kpis["not_initiated"], kpis["in_progress"],
-        kpis["staging"], kpis["qa_review"], kpis["qa_deployed"], kpis["qa_approved"],
-        kpis["production"], kpis["on_hold"], kpis["to_be_picked"],
-    ]
-    stat_colors = ["#595959", "#F4B942", "#ED7D31", "#00B0F0", "#BF8F00", "#FFC000", "#70AD47", "#00B050", "#375623", "#A6A6A6", "#7030A0"]
-    _row(draw, y, stat_w, stat_headers, stat_colors, row_h + 6, small_font, text_colors=[WHITE] * len(stat_headers))
-    y += row_h + 6
-    _row(draw, y, stat_w, stat_values, [WHITE] * len(stat_values), row_h, value_font)
-    y += row_h + (6 * SCALE)
-
-    goal_w = [202 * SCALE, 234 * SCALE]
+    goal_w = [CELL_W * SCALE, CELL_W * (MAX_PER_ROW - 1) * SCALE]
     _row(draw, y, goal_w, ["Sprint Goal", "Major Sprint Items"], ["#7030A0", "#1F3864"], row_h, header_font, text_colors=[WHITE, WHITE])
     y += row_h
     major_rows = [
@@ -181,18 +159,10 @@ def build_summary_image(form_data: dict, parsed: dict) -> bytes:
         ["", form_data.get("major_item_3", "")],
     ]
     for row_values in major_rows:
-        _row(
-            draw,
-            y,
-            goal_w,
-            row_values,
-            ["#FAE5D3", "#FFF2CC"],
-            major_h,
-            body_font,
-            aligns=["left", "left"],
-        )
+        _row(draw, y, goal_w, row_values, ["#FAE5D3", "#FFF2CC"], major_h, body_font, aligns=["left", "left"])
         y += major_h
 
+    image = image.crop((0, 0, width, int(y) + 8))
     out = io.BytesIO()
     image.save(out, format="PNG", optimize=True)
     return out.getvalue()

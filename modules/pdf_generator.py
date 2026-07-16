@@ -3,10 +3,15 @@ pdf_generator.py
 Builds a landscape PDF version of the sprint report without external PDF
 dependencies. The table is scaled to one page width and continues vertically
 across as many pages as needed.
+
+Summary-block rows (meta/KPI/bucket counts) are laid out generically from the
+project's configured buckets/KPIs, so any number of them renders correctly.
+Task-table status cells are colored by looking the status up in the
+project's status_map -> bucket -> bucket color, instead of hardcoded keyword
+matching.
 """
 
 import io
-from datetime import date
 from typing import Iterable
 
 JIRA_BASE = "https://jira-zigram.atlassian.net/browse"
@@ -17,8 +22,8 @@ MARGIN = 18
 WHITE = "FFFFFF"
 BLACK = "000000"
 BLUE = "1F3864"
-LIGHT_GRID = "D9E2F3"
-MUTED_GRID = "E2E8F0"
+
+DARK_FILLS = {"1F3864", "2E75B6", "7030A0", "375623", "C00000", "000000", "1F4E79", "00B0F0"}
 
 
 def _rgb(hex_color: str) -> tuple[float, float, float]:
@@ -30,15 +35,20 @@ def _rgb(hex_color: str) -> tuple[float, float, float]:
     )
 
 
+def _hex(color: str) -> str:
+    return color.strip("#").upper()
+
+
+def _contrast_text(hex_color: str) -> str:
+    """Pick black or white text for readability against a given fill color."""
+    r, g, b = _rgb(hex_color)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return BLACK if luminance > 0.55 else WHITE
+
+
 def _pdf_text(value) -> str:
     text = "" if value is None else str(value)
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def _safe_date(value) -> str:
-    if isinstance(value, date):
-        return value.strftime("%d %b %Y")
-    return "" if value is None else str(value)
 
 
 def _wrap_text(value, width: float, font_size: float) -> list[str]:
@@ -121,7 +131,7 @@ class _PDF:
     def bytes(self) -> bytes:
         objects: list[bytes] = [
             b"<< /Type /Catalog /Pages 2 0 R >>",
-            b"",  # pages placeholder
+            b"",
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
         ]
@@ -169,7 +179,7 @@ class _PDF:
 def _draw_row(pdf: _PDF, x: float, y: float, widths: list[float], values: Iterable, fills: list[str], height: float, size=6.2, bold=False):
     cursor = x
     for width, value, fill in zip(widths, values, fills):
-        text_color = WHITE if fill in {"1F3864", "2E75B6", "7030A0", "375623", "C00000", "000000"} else BLACK
+        text_color = WHITE if fill.upper() in DARK_FILLS else BLACK
         pdf.cell(cursor, y, width, height, value, fill=fill, text_color=text_color, size=size, bold=bold)
         cursor += width
 
@@ -178,6 +188,21 @@ def _row_height(values: list, widths: list[float], font_size: float, min_height=
     line_counts = [_wrap_text(v, w - 5, font_size) for v, w in zip(values, widths)]
     max_lines = max(len(lines) for lines in line_counts)
     return min(max(min_height, 5 + max_lines * (font_size + 1.8)), max_height)
+
+
+def _draw_item_grid(pdf, table_x, table_w, y, items, max_per_row=11):
+    """items: list of (label, value, color hex without #). Wraps into rows of max_per_row."""
+    for start in range(0, len(items), max_per_row):
+        chunk = items[start:start + max_per_row]
+        headers = [it[0] for it in chunk]
+        values = [it[1] for it in chunk]
+        colors = [it[2] for it in chunk]
+        w = [table_w / len(chunk)] * len(chunk)
+        _draw_row(pdf, table_x, y - 18, w, headers, colors, 18, size=6.2, bold=True)
+        y -= 36
+        _draw_row(pdf, table_x, y, w, values, [WHITE] * len(values), 18, size=7, bold=True)
+        y -= 30
+    return y
 
 
 def build_pdf(form_data: dict, parsed: dict) -> bytes:
@@ -191,65 +216,34 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
 
     kpis = parsed["kpis"]
     hierarchy = parsed["hierarchy"]
+    buckets = parsed["buckets"]
+    kpi_defs = parsed["kpi_defs"]
+    status_map = parsed["status_map"]
+    bucket_colors = {b["key"]: _hex(b["color"]) for b in buckets}
+    bucket_counts = kpis["bucket_counts"]
+    kpi_values = kpis["kpi_values"]
 
     pdf.rect(MARGIN, y - 38, table_w, 38, fill=BLUE, stroke=BLUE)
     pdf.text(MARGIN + 12, y - 16, f"Sprint Report - {form_data['project_name']}", size=16, color=WHITE, bold=True)
     pdf.text(MARGIN + 12, y - 30, f"Sprint #{form_data['sprint_number']} | Generated report", size=8.5, color="BDD7EE")
     y -= 52
 
-    meta_headers = [
-        "Sprint Number", "Sprint Start Date", "Sprint Development Release", "Sprint QA Release",
-        "Production Release", "Sprint End Date", "Total No. of Days", "Scrum Master",
-    ]
-    meta_values = [
-        form_data["sprint_number"],
-        _safe_date(form_data["sprint_start"]),
-        _safe_date(form_data["dev_release"]),
-        _safe_date(form_data["qa_release"]),
-        _safe_date(form_data["prod_release"]),
-        _safe_date(form_data["sprint_end"]),
-        form_data["total_days"],
-        form_data["scrum_master"],
-    ]
-    meta_w = [table_w / len(meta_headers)] * len(meta_headers)
-    _draw_row(pdf, table_x, y - 18, meta_w, meta_headers, ["1F3864"] * len(meta_headers), 18, size=6.3, bold=True)
-    y -= 36
-    _draw_row(pdf, table_x, y, meta_w, meta_values, ["FFF2CC"] * len(meta_values), 18, size=6.5)
-    y -= 30
+    # Meta fields differ by sprint type (Product has Dev/QA/Prod releases,
+    # Design has a single Release Date) - app.py builds the right set.
+    meta_items = [(label, value, _hex(color)) for label, value, color in (form_data.get("meta_items") or [])]
+    y = _draw_item_grid(pdf, table_x, table_w, y, meta_items, max_per_row=9)
 
-    kpi_headers = ["Days Left", "Action Items", "Completed - QA", "Completion - QA %", "Pending %", "Not Initiated %", "Production Release %"]
-    kpi_values = [
-        form_data["days_left"],
-        kpis["action_items"],
-        kpis["completed_qa"],
-        kpis["completion_qa_pct"],
-        kpis["pending_pct"],
-        kpis["not_initiated_pct"],
-        kpis["production_release_pct"],
-    ]
-    kpi_colors = ["000000", "1F3864", "00B050", "00B050", "FFC000", "ED7D31", "375623"]
-    kpi_w = [table_w / len(kpi_headers)] * len(kpi_headers)
-    _draw_row(pdf, table_x, y - 18, kpi_w, kpi_headers, kpi_colors, 18, size=6.2, bold=True)
-    y -= 36
-    _draw_row(pdf, table_x, y, kpi_w, kpi_values, [WHITE] * len(kpi_values), 18, size=7, bold=True)
-    y -= 30
+    kpi_items = [("Days Left", form_data["days_left"], "000000"), ("Action Items", kpis["action_items"], "1F3864")]
+    for k in kpi_defs:
+        v = kpi_values.get(k["key"], {"pct_display": "0%"})
+        kpi_items.append((k["label"], v["pct_display"], _hex(k["color"])))
+    y = _draw_item_grid(pdf, table_x, table_w, y, kpi_items)
 
-    stat_headers = [
-        "Daily Task Count", "Pending Action Items", "Not Initiated", "In Progress", "Staging",
-        "QA Review", "QA Deployed", "QA Approved", "Production", "On Hold", "Another Sprint",
-    ]
     daily_task = round(kpis["action_items"] / form_data["total_days"], 2) if form_data["total_days"] > 0 else 0
-    stat_values = [
-        daily_task, kpis["pending_action_items"], kpis["not_initiated"], kpis["in_progress"],
-        kpis["staging"], kpis["qa_review"], kpis["qa_deployed"], kpis["qa_approved"],
-        kpis["production"], kpis["on_hold"], kpis["to_be_picked"],
-    ]
-    stat_colors = ["595959", "F4B942", "ED7D31", "00B0F0", "BF8F00", "FFC000", "70AD47", "00B050", "375623", "A6A6A6", "7030A0"]
-    stat_w = [table_w / len(stat_headers)] * len(stat_headers)
-    _draw_row(pdf, table_x, y - 20, stat_w, stat_headers, stat_colors, 20, size=5.6, bold=True)
-    y -= 39
-    _draw_row(pdf, table_x, y, stat_w, stat_values, [WHITE] * len(stat_values), 18, size=7, bold=True)
-    y -= 32
+    stat_items = [("Daily Task Count", daily_task, "595959")]
+    for b in buckets:
+        stat_items.append((b["label"], bucket_counts.get(b["key"], 0), _hex(b["color"])))
+    y = _draw_item_grid(pdf, table_x, table_w, y, stat_items)
 
     goal_w = [table_w * 0.38, table_w * 0.62]
     major_rows = [
@@ -257,10 +251,7 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
         ["", form_data.get("major_item_2", "")],
         ["", form_data.get("major_item_3", "")],
     ]
-    goal_heights = [
-        _row_height(row, goal_w, 6.5, min_height=20, max_height=44)
-        for row in major_rows
-    ]
+    goal_heights = [_row_height(row, goal_w, 6.5, min_height=20, max_height=44) for row in major_rows]
     _draw_row(pdf, table_x, y - 18, goal_w, ["Sprint Goal", "Major Sprint Items"], ["7030A0", "1F3864"], 18, size=6.5, bold=True)
     y -= 18
     for row, row_h in zip(major_rows, goal_heights):
@@ -268,12 +259,13 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
         _draw_row(pdf, table_x, y, goal_w, row, ["FAE5D3", "FFF2CC"], row_h, size=6.5)
     y -= 22
 
+    label_header = form_data.get("label_header", "Label")
     headers = [
         "S.No", "Issue Key", "Jira Link / Confluence Document Link", "Issue Type",
         "Summary / Title", "Status", "Priority", "Assignee", "Start Date", "End Date",
-        "Revised Start Date", "Revised End Date", "Comment",
+        "Revised Start Date", "Revised End Date", "Comment", label_header,
     ]
-    proportions = [0.035, 0.055, 0.13, 0.055, 0.19, 0.065, 0.045, 0.075, 0.055, 0.055, 0.06, 0.06, 0.12]
+    proportions = [0.035, 0.055, 0.13, 0.055, 0.15, 0.065, 0.045, 0.075, 0.055, 0.055, 0.06, 0.06, 0.10, 0.06]
     widths = [table_w * p for p in proportions]
 
     rows = []
@@ -306,20 +298,11 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
 
         indent = "" if item["level"] == 0 else ("  > " if item["level"] == 1 else "    - ")
         rows.append([
-            item_sno,
-            item["issue_key"],
+            item_sno, item["issue_key"],
             f"{JIRA_BASE}/{item['issue_key']}" if item["issue_key"] != "-" else "",
-            item["issue_type"],
-            indent + item["summary"],
-            item["status"],
-            item["priority"],
-            item["assignee"],
-            item["target_start"],
-            item["target_end"],
-            "",
-            "",
-            item.get("latest_comment", ""),
-            item["level"],
+            item["issue_type"], indent + item["summary"], item["status"], item["priority"],
+            item["assignee"], item["target_start"], item["target_end"], "", "",
+            item.get("latest_comment", ""), item.get("labels", ""), item["level"],
         ])
 
     def draw_task_header(current_y: float) -> float:
@@ -331,6 +314,7 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
         y = page_h - MARGIN
     y = draw_task_header(y)
 
+    default_status_fill = "FCE4D6"
     for row in rows:
         values = row[:-1]
         level = row[-1]
@@ -346,11 +330,15 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
         else:
             fills = [WHITE] * len(values)
             status = str(values[5])
-            fills[5] = "C6EFCE" if any(s in status for s in ["Done", "Production", "Released"]) else (
-                "FFEB9C" if "Progress" in status else ("FFF2CC" if "Staging" in status else "FCE4D6")
-            )
+            bucket_key = status_map.get(status.lower().strip())
+            fills[5] = bucket_colors.get(bucket_key, default_status_fill)
             bold = level == 1
-        _draw_row(pdf, table_x, y - height, widths, values, fills, height, size=5.4, bold=bold)
+        status_text_color = _contrast_text(fills[5])
+        cursor = table_x
+        for i, (width, value, fill) in enumerate(zip(widths, values, fills)):
+            text_color = status_text_color if i == 5 else (WHITE if fill.upper() in DARK_FILLS else BLACK)
+            pdf.cell(cursor, y - height, width, height, value, fill=fill, text_color=text_color, size=5.4, bold=bold)
+            cursor += width
         y -= height
 
     return pdf.bytes()
