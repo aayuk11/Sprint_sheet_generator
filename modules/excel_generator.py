@@ -12,6 +12,9 @@ number of them lays out correctly, nothing is a fixed set of columns.
 import io
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+from . import columns as task_columns_def
 
 JIRA_BASE = "https://jira-zigram.atlassian.net/browse"
 
@@ -174,15 +177,13 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
     row += 1
 
     task_start_row = row + 1
-    label_header = form_data.get('label_header', 'Label')
-    task_headers = [
-        'S.No', 'Issue Key', 'Jira Link / Confluence Document Link', 'Issue Type',
-        'Summary / Title', 'Status', 'Priority', 'Assignee', 'Start Date', 'End Date',
-        'Revised Start Date', 'Revised End Date', 'Comment', label_header,
-    ]
-    for col_idx, label in enumerate(task_headers, 1):
+    # Column order/visibility comes from the project config (see modules/columns.py).
+    active_cols = task_columns_def.active(
+        form_data.get('task_columns'), form_data.get('label_header', 'Label')
+    )
+    for col_idx, col in enumerate(active_cols, 1):
         c = ws.cell(task_start_row, col_idx)
-        c.value = label
+        c.value = col['label']
         _apply(c, _hdr('D1BBF0', fg='4A235A'))
     ws.row_dimensions[task_start_row].height = 28
 
@@ -233,7 +234,7 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
     for item in rows_with_spacers:
         if item is None:
             ws.row_dimensions[current_row].height = 8
-            for col in range(1, 15):
+            for col in range(1, len(active_cols) + 1):
                 ws.cell(current_row, col).fill = PatternFill('solid', start_color='FFFFFF')
             current_row += 1
             continue
@@ -257,32 +258,40 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
 
         ws.row_dimensions[current_row].height = row_h
 
-        row_data = [
-            item.get('sno', ''), ik, url, item['issue_type'], summary_disp,
-            item['status'], item['priority'], item['assignee'],
-            item['target_start'], item['target_end'], '', '',
-            item.get('latest_comment', ''), item.get('labels', ''),
-        ]
-
-        WRAP_COLS = {5, 13, 14}
-        URL_COL = 3
-        STATUS_COL = 6
+        values_by_key = {
+            'sno':        item.get('sno', ''),
+            'issue_key':  ik,
+            'jira_link':  url,
+            'issue_type': item['issue_type'],
+            'summary':    summary_disp,
+            'status':     item['status'],
+            'priority':   item['priority'],
+            'assignee':   item['assignee'],
+            'start_date': item['target_start'],
+            'end_date':   item['target_end'],
+            'rev_start':  '',
+            'rev_end':    '',
+            'comment':    item.get('latest_comment', ''),
+            'labels':     item.get('labels', ''),
+        }
 
         bucket_key = status_map.get(str(item['status']).lower().strip())
         status_fill = _hex(bucket_colors.get(bucket_key, DEFAULT_STATUS_FILL))
         status_fg = _contrast_fg(status_fill)
 
-        for col_idx, val in enumerate(row_data, 1):
+        for col_idx, col in enumerate(active_cols, 1):
+            val = values_by_key.get(col['key'], '')
             cell = ws.cell(current_row, col_idx)
-            cell.alignment = Alignment(vertical='center', wrap_text=(col_idx in WRAP_COLS))
+            cell.alignment = Alignment(vertical='center', wrap_text=bool(col.get('wrap')))
             cell.border = border_epic if level == 0 else border_sub
+            role = col.get('role')
 
-            if col_idx == URL_COL:
+            if role == 'url':
                 cell.value = val
                 cell.hyperlink = val
                 cell.font = Font(bold=False, color='4472C4', name='Arial', size=sz, underline='single')
                 cell.fill = PatternFill('solid', start_color=bg)
-            elif col_idx == STATUS_COL:
+            elif role == 'status':
                 cell.value = val
                 cell.fill = PatternFill('solid', start_color=status_fill)
                 cell.font = Font(bold=True, name='Arial', size=sz, color=status_fg)
@@ -293,12 +302,9 @@ def build_excel(form_data: dict, parsed: dict) -> bytes:
 
         current_row += 1
 
-    col_widths = {
-        'A': 8, 'B': 14, 'C': 50, 'D': 14, 'E': 58, 'F': 16, 'G': 13,
-        'H': 24, 'I': 16, 'J': 16, 'K': 18, 'L': 18, 'M': 60, 'N': 24,
-    }
-    for col, w in col_widths.items():
-        ws.column_dimensions[col].width = w
+    # Widths follow the configured column order, not fixed sheet letters.
+    for col_idx, col in enumerate(active_cols, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = col['excel_w']
 
     ws.freeze_panes = f'A{task_start_row + 1}'
 

@@ -26,6 +26,7 @@ from modules.image_generator import build_summary_image
 from modules import store
 from modules import jira_client
 from modules import cliq_client
+from modules import columns
 
 PROJECTS = [
     "Product Design",
@@ -108,6 +109,15 @@ def _project_defaults(project_name: str) -> dict:
     }
 
 
+def _sprint_type_for_project(project_name: str) -> str:
+    """The sprint type a project is normally run as - the saved one if any,
+    else Design for the design project and Product for everything else.
+    Used to pick default column order in Settings."""
+    saved = st.session_state.get("saved_sprint_details", {}).get(project_name, {})
+    default_type = "Design Sprint" if project_name == DESIGN_PROJECT else "Product Sprint"
+    return saved.get("sprint_type", default_type)
+
+
 def _hydrate_project_form(project_name: str) -> None:
     for key, value in _project_defaults(project_name).items():
         st.session_state[key] = value
@@ -150,7 +160,7 @@ def _serialize_form_data(form_data: dict) -> dict:
     prod_release), so this doesn't hardcode which keys exist."""
     serialized = {}
     for k, v in form_data.items():
-        if k == "meta_items":
+        if k in ("meta_items", "label_header", "task_columns"):
             continue  # display-only, rebuilt fresh each time a report is generated
         serialized[k] = v.isoformat() if isinstance(v, date) else v
     return serialized
@@ -369,17 +379,22 @@ def _default_config_for(project_name: str) -> dict:
     Design project -> Design set; the 3 legacy projects -> their old maps;
     everything else -> the full standard Product set. Never the empty seed."""
     if project_name == DESIGN_PROJECT:
-        return {
+        cfg = {
             "buckets": [dict(b) for b in _DESIGN_DEFAULT["buckets"]],
             "kpis": [dict(k) for k in _DESIGN_DEFAULT["kpis"]],
             "status_map": dict(_DESIGN_DEFAULT["status_map"]),
             "known_statuses": list(_DESIGN_DEFAULT["known_statuses"]),
         }
-    builtin = _BUILTIN_PROJECT_MAPS.get(project_name)
-    if builtin:
-        known = [s.title() for s in builtin["status_map"]]
-        return _migrate_one_status_mapping({**builtin, "known_statuses": known})
-    return _product_default_config()
+    else:
+        builtin = _BUILTIN_PROJECT_MAPS.get(project_name)
+        if builtin:
+            known = [s.title() for s in builtin["status_map"]]
+            cfg = _migrate_one_status_mapping({**builtin, "known_statuses": known})
+        else:
+            cfg = _product_default_config()
+    # None = no explicit column order saved; the sprint-type default is used.
+    cfg["task_columns"] = None
+    return cfg
 
 
 def _effective_project_config(project_name: str) -> dict:
@@ -390,6 +405,8 @@ def _effective_project_config(project_name: str) -> dict:
             "kpis": [dict(k) for k in cfg.get("kpis", [])],
             "status_map": dict(cfg.get("status_map", {})),
             "known_statuses": list(cfg.get("known_statuses", [])),
+            # None (not a default) when unsaved, so the sprint-type default applies.
+            "task_columns": [dict(c) for c in cfg.get("task_columns", [])] or None,
         }
     return _default_config_for(project_name)
 
@@ -411,7 +428,13 @@ def _ensure_editor(project_name: str) -> dict:
         st.session_state.editor = {}
     if project_name not in st.session_state.editor:
         cfg = _effective_project_config(project_name)
-        st.session_state.editor[project_name] = {"buckets": cfg["buckets"], "kpis": cfg["kpis"]}
+        st.session_state.editor[project_name] = {
+            "buckets": cfg["buckets"],
+            "kpis": cfg["kpis"],
+            "task_columns": columns.resolve(
+                cfg.get("task_columns"), _sprint_type_for_project(project_name)
+            ),
+        }
     return st.session_state.editor[project_name]
 
 
@@ -464,6 +487,35 @@ def render_settings_page() -> None:
         ed["kpis"].append(_new_kpi(_next_seq(ed["kpis"], "kpi")))
         st.rerun()
 
+    # ---- Task table columns (order + visibility) ----
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown("**Task Table Columns** — order and show/hide the columns of the sprint sheet")
+    st.caption("Applies to the Excel and PDF task table. Use ▲ / ▼ to reorder; untick to hide.")
+    cols_ed = ed["task_columns"]
+    label_hdr = ("Requirement Type" if _sprint_type_for_project(project) == "Design Sprint" else "Label")
+    for i, entry in enumerate(list(cols_ed)):
+        cdef = columns.BY_KEY.get(entry["key"])
+        if not cdef:
+            continue
+        name = label_hdr if entry["key"] == columns.LABELS_KEY else cdef["label"]
+        c1, c2, c3, c4 = st.columns([4, 1.2, 0.5, 0.5])
+        c1.markdown(f"<div style='padding-top:6px;font-size:13px;'>{i + 1}. {_html_escape(name)}</div>",
+                    unsafe_allow_html=True)
+        entry["visible"] = c2.checkbox("Show", value=entry.get("visible", True),
+                                        key=f"cv_{project}_{entry['key']}")
+        if c3.button("▲", key=f"cu_{project}_{entry['key']}", help="Move up", disabled=(i == 0)):
+            cols_ed[i - 1], cols_ed[i] = cols_ed[i], cols_ed[i - 1]
+            st.rerun()
+        if c4.button("▼", key=f"cd_{project}_{entry['key']}", help="Move down",
+                     disabled=(i == len(cols_ed) - 1)):
+            cols_ed[i + 1], cols_ed[i] = cols_ed[i], cols_ed[i + 1]
+            st.rerun()
+    if not any(e.get("visible", True) for e in cols_ed):
+        st.warning("At least one column should stay visible.")
+    if st.button("Reset column order", key=f"cols_reset_{project}"):
+        ed["task_columns"] = columns.default_columns(_sprint_type_for_project(project))
+        st.rerun()
+
     # ---- Status mapping ----
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
     st.markdown("**Map Jira statuses to buckets**")
@@ -514,6 +566,10 @@ def render_settings_page() -> None:
                 "kpis": clean_kpis,
                 "status_map": new_status_map,
                 "known_statuses": [disp for _, disp in ordered],
+                "task_columns": [
+                    {"key": c["key"], "visible": bool(c.get("visible", True))}
+                    for c in ed["task_columns"]
+                ],
             }
             configs = dict(st.session_state.get("project_configs", {}))
             configs[project] = final_cfg
@@ -970,6 +1026,8 @@ elif step == 3:
     if st.session_state.parsed_report is None:
         with st.spinner("Parsing Jira data and building your Excel/PDF/Image report..."):
             cfg = _effective_project_config(proj)
+            # Column order/visibility: saved config, else the sprint-type default.
+            fd["task_columns"] = columns.resolve(cfg.get("task_columns"), fd.get("sprint_type"))
             parsed = parse_jira_csv(df, proj, cfg)
             st.session_state.excel_bytes = build_excel(fd, parsed)
             st.session_state.pdf_bytes = build_pdf(fd, parsed)

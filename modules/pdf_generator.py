@@ -14,6 +14,8 @@ matching.
 import io
 from typing import Iterable
 
+from . import columns as task_columns_def
+
 JIRA_BASE = "https://jira-zigram.atlassian.net/browse"
 
 A3_LANDSCAPE = (1190.55, 841.89)
@@ -259,14 +261,15 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
         _draw_row(pdf, table_x, y, goal_w, row, ["FAE5D3", "FFF2CC"], row_h, size=6.5)
     y -= 22
 
-    label_header = form_data.get("label_header", "Label")
-    headers = [
-        "S.No", "Issue Key", "Jira Link / Confluence Document Link", "Issue Type",
-        "Summary / Title", "Status", "Priority", "Assignee", "Start Date", "End Date",
-        "Revised Start Date", "Revised End Date", "Comment", label_header,
-    ]
-    proportions = [0.035, 0.055, 0.13, 0.055, 0.15, 0.065, 0.045, 0.075, 0.055, 0.055, 0.06, 0.06, 0.10, 0.06]
-    widths = [table_w * p for p in proportions]
+    # Column order/visibility comes from the project config (see modules/columns.py).
+    active_cols = task_columns_def.active(
+        form_data.get("task_columns"), form_data.get("label_header", "Label")
+    )
+    headers = [c["label"] for c in active_cols]
+    # Renormalize over the visible columns so the table always fills the page width.
+    total_p = sum(c["pdf_w"] for c in active_cols) or 1.0
+    widths = [table_w * (c["pdf_w"] / total_p) for c in active_cols]
+    status_idx = next((i for i, c in enumerate(active_cols) if c.get("role") == "status"), None)
 
     rows = []
     epic_counter = 0
@@ -297,13 +300,23 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
             item_sno = f"{last_epic_num}.{last_story_num}.{sub_num}"
 
         indent = "" if item["level"] == 0 else ("  > " if item["level"] == 1 else "    - ")
-        rows.append([
-            item_sno, item["issue_key"],
-            f"{JIRA_BASE}/{item['issue_key']}" if item["issue_key"] != "-" else "",
-            item["issue_type"], indent + item["summary"], item["status"], item["priority"],
-            item["assignee"], item["target_start"], item["target_end"], "", "",
-            item.get("latest_comment", ""), item.get("labels", ""), item["level"],
-        ])
+        values_by_key = {
+            "sno": item_sno,
+            "issue_key": item["issue_key"],
+            "jira_link": f"{JIRA_BASE}/{item['issue_key']}" if item["issue_key"] != "-" else "",
+            "issue_type": item["issue_type"],
+            "summary": indent + item["summary"],
+            "status": item["status"],
+            "priority": item["priority"],
+            "assignee": item["assignee"],
+            "start_date": item["target_start"],
+            "end_date": item["target_end"],
+            "rev_start": "",
+            "rev_end": "",
+            "comment": item.get("latest_comment", ""),
+            "labels": item.get("labels", ""),
+        }
+        rows.append(([values_by_key.get(c["key"], "") for c in active_cols], item["level"]))
 
     def draw_task_header(current_y: float) -> float:
         _draw_row(pdf, table_x, current_y - 22, widths, headers, ["D1BBF0"] * len(headers), 22, size=5.6, bold=True)
@@ -315,9 +328,7 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
     y = draw_task_header(y)
 
     default_status_fill = "FCE4D6"
-    for row in rows:
-        values = row[:-1]
-        level = row[-1]
+    for values, level in rows:
         height = _row_height(values, widths, 5.4, min_height=15, max_height=80)
         if y - height < MARGIN:
             pdf.new_page()
@@ -329,14 +340,14 @@ def build_pdf(form_data: dict, parsed: dict) -> bytes:
             bold = True
         else:
             fills = [WHITE] * len(values)
-            status = str(values[5])
-            bucket_key = status_map.get(status.lower().strip())
-            fills[5] = bucket_colors.get(bucket_key, default_status_fill)
+            if status_idx is not None:
+                bucket_key = status_map.get(str(values[status_idx]).lower().strip())
+                fills[status_idx] = bucket_colors.get(bucket_key, default_status_fill)
             bold = level == 1
-        status_text_color = _contrast_text(fills[5])
+        status_text_color = _contrast_text(fills[status_idx]) if status_idx is not None else BLACK
         cursor = table_x
         for i, (width, value, fill) in enumerate(zip(widths, values, fills)):
-            text_color = status_text_color if i == 5 else (WHITE if fill.upper() in DARK_FILLS else BLACK)
+            text_color = status_text_color if i == status_idx else (WHITE if fill.upper() in DARK_FILLS else BLACK)
             pdf.cell(cursor, y - height, width, height, value, fill=fill, text_color=text_color, size=5.4, bold=bold)
             cursor += width
         y -= height
