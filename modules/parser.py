@@ -45,6 +45,17 @@ def _ensure_datetime_column(df: pd.DataFrame, source_column: str, target_column:
         df[target] = pd.NaT
 
 
+def _coalesce_datetime(df: pd.DataFrame, target: str, sources: list) -> None:
+    """Fill `target` with the first source column that has a value per row."""
+    result = pd.Series(pd.NaT, index=df.index, dtype='datetime64[ns]')
+    for col in sources:
+        if col not in df.columns:
+            continue
+        parsed = pd.to_datetime(df[col], errors='coerce')
+        result = result.fillna(parsed)
+    df[target] = result
+
+
 def distinct_statuses(df: pd.DataFrame) -> list:
     """Distinct, non-empty Status values for non-Epic rows, display-cased."""
     if 'Status' not in df.columns:
@@ -80,10 +91,15 @@ def parse_jira_csv(df: pd.DataFrame, project_name: str, config: dict) -> dict:
     _ensure_text_column(df, 'Parent key')
     _ensure_datetime_column(df, 'Due date')
 
-    target_start_col = 'Custom field (Target start)'
-    target_end_col = 'Custom field (Target end)'
-    _ensure_datetime_column(df, target_start_col, 'Target Start')
-    _ensure_datetime_column(df, target_end_col, 'Target End')
+    # Teams fill different Jira date fields, and a CSV export names them
+    # differently again. Take the first column that actually has a value for a
+    # row, so "Target start/end" and "Start date"/"Due date" both work.
+    _coalesce_datetime(df, 'Target Start', [
+        'Custom field (Target start)', 'Custom field (Start date)', 'Start date',
+    ])
+    _coalesce_datetime(df, 'Target End', [
+        'Custom field (Target end)', 'Custom field (Due date)', 'Due date',
+    ])
     _ensure_datetime_column(df, 'Created')
     _ensure_datetime_column(df, 'Updated')
 
@@ -241,12 +257,11 @@ def _join_labels(row) -> str:
 
 
 def _make_row(row, level: int) -> dict:
+    # Only real planning dates are shown. A ticket with none renders '-' rather
+    # than falling back to Created/Updated, which looked like a real date but
+    # was just when the issue was raised / last touched.
     ts = row.get('Target Start')
     te = row.get('Target End')
-    if pd.isna(ts):
-        ts = row.get('Created')
-    if pd.isna(te):
-        te = row.get('Updated')
     return {
         'level':          level,
         'issue_key':      row['Issue key'],

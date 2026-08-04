@@ -19,7 +19,7 @@ import pandas as pd
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from modules.parser import parse_jira_csv, distinct_statuses
+from modules.parser import parse_jira_csv, distinct_statuses, STORY_LEVEL_TYPES
 from modules.excel_generator import build_excel
 from modules.pdf_generator import build_pdf
 from modules.image_generator import build_summary_image
@@ -997,6 +997,37 @@ elif step == 2:
         if unmapped:
             st.warning(f"Jira statuses not yet mapped for **{proj}** (won't be counted in any bucket): "
                        f"**{', '.join(unmapped)}**. Map them on the **Settings** page.")
+
+        # ---- Data health: dates + issue types actually usable ----
+        start_series = pd.to_datetime(df.get('Custom field (Target start)'), errors='coerce') \
+            if 'Custom field (Target start)' in df.columns else pd.Series(pd.NaT, index=df.index)
+        end_series = pd.to_datetime(df.get('Custom field (Target end)'), errors='coerce') \
+            if 'Custom field (Target end)' in df.columns else pd.Series(pd.NaT, index=df.index)
+        with_dates = int((start_series.notna() & end_series.notna()).sum())
+        sf, ef = jira_client.last_date_fields()
+        if sf or ef:
+            st.caption(f"📅 Dates read from — Start: **{sf}** · End: **{ef}**")
+        if with_dates == 0:
+            st.warning("No issue has both a start and an end date. Rows will show '-'. "
+                       "If your team does set dates, the field names may differ - set "
+                       "`target_start_field` / `target_end_field` in the `[jira]` secrets.")
+        else:
+            st.caption(f"📅 {with_dates} of {len(df)} issues have both dates; the rest show '-'.")
+
+        known_types = set(STORY_LEVEL_TYPES) | {'Epic', 'Sub-task'}
+        dropped = sorted({str(t) for t in df['Issue Type'].dropna().unique() if str(t) not in known_types})
+        if dropped:
+            st.warning(f"These issue types won't appear in the task table (they still count in KPIs): "
+                       f"**{', '.join(dropped)}**.")
+        # Parent epics referenced but not fetched -> rendered as [EXTERNAL EPIC]
+        if 'Parent key' in df.columns:
+            keys = set(df['Issue key'].astype(str))
+            story_rows = df[df['Issue Type'].isin(STORY_LEVEL_TYPES)]
+            missing_epics = sorted({str(p) for p in story_rows['Parent key'].dropna()
+                                    if str(p).strip() and str(p) not in keys})
+            if missing_epics:
+                st.warning(f"{len(missing_epics)} parent epic(s) are not in this result set, so they show as "
+                           f"**[EXTERNAL EPIC]** with no name. Include them in the query to show full detail.")
 
         st.markdown('<div class="section-title">Data Preview (first 5 rows)</div>', unsafe_allow_html=True)
         pcols = [c for c in ['Issue key', 'Issue Type', 'Summary', 'Status', 'Priority', 'Assignee', 'Parent key'] if c in df.columns]
